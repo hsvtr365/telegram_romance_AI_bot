@@ -1,4 +1,4 @@
-package chat
+package proactive
 
 import (
 	"strings"
@@ -6,7 +6,7 @@ import (
 	"unicode/utf8"
 )
 
-func PostProcess(text string, _ int) string {
+func postProcessText(text string) string {
 	text = strings.TrimSpace(text)
 	text = strings.TrimPrefix(text, "assistant:")
 	text = strings.TrimPrefix(text, "Assistant:")
@@ -35,71 +35,10 @@ func PostProcess(text string, _ int) string {
 		prev = line
 	}
 
-	text = strings.Join(cleaned, "\n")
-
-	return strings.TrimSpace(text)
+	return strings.TrimSpace(strings.Join(cleaned, "\n"))
 }
 
-func sanitizeFreshConversationReply(text string) string {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return text
-	}
-
-	lines := strings.Split(text, "\n")
-	filtered := make([]string, 0, len(lines))
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		if soundsFalseFamiliar(line) {
-			continue
-		}
-		filtered = append(filtered, line)
-	}
-
-	text = strings.TrimSpace(strings.Join(filtered, "\n"))
-	if text == "" {
-		return "안녕. 이제 왔네. 이름부터 천천히 알려줘."
-	}
-	return text
-}
-
-func sanitizeByConversationPhase(text string, phase string) string {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return text
-	}
-	return text
-}
-
-func soundsFalseFamiliar(line string) bool {
-	line = strings.TrimSpace(line)
-	return containsAnyPhrase(line,
-		"오랜만",
-		"드디어 연락",
-		"기억나",
-		"기억난",
-		"다시 왔네",
-		"또 왔네",
-		"잘 지냈어?",
-		"얼마 만",
-		"예전부터",
-		"전에 봤",
-	)
-}
-
-func containsAnyPhrase(text string, phrases ...string) bool {
-	for _, phrase := range phrases {
-		if strings.Contains(text, phrase) {
-			return true
-		}
-	}
-	return false
-}
-
-func SplitReplyForTelegram(text string) []string {
+func splitReplyForTelegram(text string) []string {
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -134,7 +73,6 @@ func SplitReplyForTelegram(text string) []string {
 			continue
 		}
 
-		// Keep repeated punctuation and closing marks attached to the same sentence.
 		for i+1 < len(runes) {
 			next := runes[i+1]
 			if isSentenceBoundary(next) || isClosingMark(next) {
@@ -145,8 +83,6 @@ func SplitReplyForTelegram(text string) []string {
 			break
 		}
 
-		// If the sentence ends with trailing emojis, keep them attached to the
-		// sentence so Telegram does not send them as their own message bubble.
 		nextIndex, emojiSuffix := collectTrailingEmojiSuffix(runes, i+1)
 		if emojiSuffix != "" {
 			current.WriteString(emojiSuffix)
@@ -277,18 +213,5 @@ func isEmojiLike(r rune) bool {
 		return true
 	}
 
-	switch {
-	case r >= 0x1F300 && r <= 0x1FAFF:
-		return true
-	case r >= 0x2600 && r <= 0x27BF:
-		return true
-	case r >= 0x1F1E6 && r <= 0x1F1FF:
-		return true
-	case r == 0x200D:
-		return true
-	case r == 0xFE0E || r == 0xFE0F:
-		return true
-	default:
-		return false
-	}
+	return unicode.Is(unicode.So, r) || unicode.Is(unicode.Sk, r)
 }

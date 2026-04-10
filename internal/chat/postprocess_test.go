@@ -39,3 +39,11 @@ func TestSplitReplyForTelegram_ChainsShortSentences(t *testing.T) {
 		t.Fatalf("unexpected split result\nwant=%v\ngot=%v", want, got)
 	}
 }
+
+func TestSanitizeByConversationPhase_PreservesText(t *testing.T) {
+	input := "일 얼른 끝내놓고 기다리고 있어.\n이따 봐."
+	got := sanitizeByConversationPhase(input, phaseNeutral)
+	if got != input {
+		t.Fatalf("expected phase sanitizer to preserve text, got %q", got)
+	}
+}

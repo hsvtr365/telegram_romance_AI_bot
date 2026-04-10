@@ -5,11 +5,14 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/chat"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/config"
+	"github.com/hsvtr365/telegram_romance_AI_bot/internal/holiday"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/httpserver"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/ollama"
+	"github.com/hsvtr365/telegram_romance_AI_bot/internal/proactive"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/store"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/telegram"
 )
@@ -19,6 +22,8 @@ type App struct {
 	logger     *slog.Logger
 	poller     *telegram.Poller
 	httpServer *httpserver.Server
+	proactive  *proactive.Scheduler
+	holiday    *holiday.Syncer
 	store      *store.Manager
 }
 
@@ -35,6 +40,35 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		TopP:        cfg.Ollama.TopP,
 	}, logger)
 
+	reminderLLM := buildVariantLLM(
+		ollamaClient,
+		cfg.Ollama,
+		cfg.Proactive.ReminderModel,
+		func(base ollama.Config) ollama.Config {
+			base.TimeoutSec = maxInt(10, minInt(base.TimeoutSec, 20))
+			base.KeepAlive = "5m"
+			base.NumCtx = minInt(base.NumCtx, 1024)
+			base.Temperature = 0.8
+			return base
+		},
+		logger,
+	)
+
+	structuredLLM := buildVariantLLM(
+		ollamaClient,
+		cfg.Ollama,
+		cfg.Chat.StructuredModel,
+		func(base ollama.Config) ollama.Config {
+			base.TimeoutSec = maxInt(8, minInt(base.TimeoutSec, 15))
+			base.KeepAlive = "3m"
+			base.NumCtx = minInt(base.NumCtx, 768)
+			base.Temperature = 0.1
+			base.TopP = 0.8
+			return base
+		},
+		logger,
+	)
+
 	conversationStore, err := store.New(ctx, store.Config{
 		PostgresDSN: cfg.Storage.PostgresDSN,
 		RedisURL:    cfg.Storage.RedisURL,
@@ -44,10 +78,18 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	}
 
 	chatService := chat.NewService(chat.Config{
-		DefaultMode:      chat.ParseMode(cfg.Chat.DefaultMode),
-		RecentTurnLimit:  cfg.Chat.RecentTurnLimit,
-		ResponseMaxChars: cfg.Chat.ResponseMaxChars,
-	}, tgClient, ollamaClient, conversationStore, logger)
+		RecentTurnLimit:           cfg.Chat.RecentTurnLimit,
+		ResponseMaxChars:          cfg.Chat.ResponseMaxChars,
+		StructuredExtractEnabled:  cfg.Chat.StructuredExtract,
+		StructuredExtractMinChars: cfg.Chat.StructuredMinChars,
+	}, tgClient, ollamaClient, reminderLLM, structuredLLM, conversationStore, logger)
+
+	holidayResolver := holiday.NewResolver(conversationStore, holiday.ResolverConfig{
+		LookaheadDays:   cfg.Holiday.LookaheadDays,
+		TodayPercent:    cfg.Holiday.PromptTodayPct,
+		UpcomingPercent: cfg.Holiday.PromptUpcomingPct,
+	}, logger)
+	chatService.SetHolidayResolver(holidayResolver)
 
 	poller := telegram.NewPoller(telegram.PollingConfig{
 		TimeoutSec:     cfg.Telegram.PollTimeoutSec,
@@ -57,11 +99,39 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 
 	httpServer := httpserver.New(cfg.App.Port, logger)
 
+	proactiveScheduler := proactive.NewScheduler(proactive.Config{
+		Enabled:                 cfg.Proactive.Enabled,
+		EnableReconnect:         true,
+		EnableEventFollowup:     true,
+		EnableMoodRepair:        true,
+		EnableHabitPing:         true,
+		RecentConversationLimit: cfg.Chat.RecentTurnLimit,
+		FeedbackInterval:        time.Duration(cfg.Proactive.FeedbackIntervalSec) * time.Second,
+		DecisionScanInterval:    time.Duration(cfg.Proactive.ScanIntervalSec) * time.Second,
+		ReminderScanInterval:    time.Duration(cfg.Proactive.ReminderScanIntervalSec) * time.Second,
+		TimezoneName:            cfg.Proactive.DefaultTimezone,
+	}, newProactiveRepository(conversationStore), tgClient, ollamaClient, reminderLLM, logger)
+	proactiveScheduler.SetHolidayResolver(holidayResolver)
+
+	var holidaySyncer *holiday.Syncer
+	if cfg.Holiday.SyncEnabled {
+		holidayClient := holiday.NewClient(cfg.Holiday.APIServiceKey, 15*time.Second)
+		holidayClient.SetBaseURL(cfg.Holiday.APIBaseURL)
+		holidaySyncer = holiday.NewSyncer(
+			conversationStore,
+			holidayClient,
+			time.Duration(cfg.Holiday.SyncIntervalHours)*time.Hour,
+			logger,
+		)
+	}
+
 	return &App{
 		cfg:        cfg,
 		logger:     logger,
 		poller:     poller,
 		httpServer: httpServer,
+		proactive:  proactiveScheduler,
+		holiday:    holidaySyncer,
 		store:      conversationStore,
 	}, nil
 }
@@ -72,11 +142,12 @@ func (a *App) Run(ctx context.Context) error {
 	a.logger.Info(
 		"starting telegram long polling bot",
 		"app", a.cfg.App.Name,
-		"mode", a.cfg.Chat.DefaultMode,
 		"ollama_model", a.cfg.Ollama.Model,
+		"reminder_model", coalesce(a.cfg.Proactive.ReminderModel, a.cfg.Ollama.Model),
+		"structured_model", coalesce(a.cfg.Chat.StructuredModel, a.cfg.Ollama.Model),
 	)
 
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 4)
 
 	go func() {
 		errCh <- a.httpServer.Run(ctx)
@@ -85,6 +156,18 @@ func (a *App) Run(ctx context.Context) error {
 	go func() {
 		errCh <- a.poller.Run(ctx)
 	}()
+
+	if a.proactive != nil {
+		go func() {
+			errCh <- a.proactive.Run(ctx)
+		}()
+	}
+
+	if a.holiday != nil {
+		go func() {
+			errCh <- a.holiday.Run(ctx)
+		}()
+	}
 
 	for {
 		select {
@@ -97,4 +180,46 @@ func (a *App) Run(ctx context.Context) error {
 			return err
 		}
 	}
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func coalesce(value, fallback string) string {
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func buildVariantLLM(baseLLM chat.LLM, baseCfg config.OllamaConfig, model string, tune func(ollama.Config) ollama.Config, logger *slog.Logger) chat.LLM {
+	model = coalesce(model, baseCfg.Model)
+	if model == baseCfg.Model {
+		return baseLLM
+	}
+
+	cfg := ollama.Config{
+		BaseURL:     baseCfg.BaseURL,
+		Model:       model,
+		TimeoutSec:  baseCfg.TimeoutSec,
+		KeepAlive:   baseCfg.KeepAlive,
+		NumCtx:      baseCfg.NumCtx,
+		Temperature: baseCfg.Temperature,
+		TopP:        baseCfg.TopP,
+	}
+	if tune != nil {
+		cfg = tune(cfg)
+	}
+	return ollama.NewClient(cfg, logger)
 }

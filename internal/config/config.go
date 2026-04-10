@@ -8,11 +8,13 @@ import (
 )
 
 type Config struct {
-	App      AppConfig
-	Telegram TelegramConfig
-	Ollama   OllamaConfig
-	Storage  StorageConfig
-	Chat     ChatConfig
+	App       AppConfig
+	Telegram  TelegramConfig
+	Ollama    OllamaConfig
+	Storage   StorageConfig
+	Chat      ChatConfig
+	Proactive ProactiveConfig
+	Holiday   HolidayConfig
 }
 
 type AppConfig struct {
@@ -44,12 +46,40 @@ type StorageConfig struct {
 }
 
 type ChatConfig struct {
-	DefaultMode            string
 	RecentTurnLimit        int
 	SummaryTriggerMessages int
 	SessionLockTTLSec      int
 	CooldownSec            int
 	ResponseMaxChars       int
+	StructuredExtract      bool
+	StructuredMinChars     int
+	StructuredModel        string
+}
+
+type ProactiveConfig struct {
+	Enabled                 bool
+	ScanIntervalSec         int
+	ReminderScanIntervalSec int
+	FeedbackIntervalSec     int
+	ReplyWindowHours        int
+	DefaultTimezone         string
+	AllowedStartHour        int
+	AllowedEndHour          int
+	ReconnectIdleHours      int
+	EventLookaheadHours     int
+	EventFollowupGraceHours int
+	MaxCandidatesPerScan    int
+	ReminderModel           string
+}
+
+type HolidayConfig struct {
+	SyncEnabled       bool
+	APIServiceKey     string
+	APIBaseURL        string
+	SyncIntervalHours int
+	LookaheadDays     int
+	PromptTodayPct    int
+	PromptUpcomingPct int
 }
 
 func Load(dotenvPath string) (Config, error) {
@@ -83,12 +113,38 @@ func Load(dotenvPath string) (Config, error) {
 			RedisURL:    strings.TrimSpace(os.Getenv("REDIS_URL")),
 		},
 		Chat: ChatConfig{
-			DefaultMode:            envString("DEFAULT_CHAT_MODE", "spicy"),
 			RecentTurnLimit:        envInt("RECENT_TURN_LIMIT", 14),
 			SummaryTriggerMessages: envInt("SUMMARY_TRIGGER_MESSAGES", 10),
 			SessionLockTTLSec:      envInt("SESSION_LOCK_TTL_SEC", 20),
 			CooldownSec:            envInt("CHAT_COOLDOWN_SEC", 2),
 			ResponseMaxChars:       envInt("RESPONSE_MAX_CHARS", 0),
+			StructuredExtract:      envBool("CHAT_STRUCTURED_EXTRACT_ENABLED", true),
+			StructuredMinChars:     envInt("CHAT_STRUCTURED_EXTRACT_MIN_CHARS", 12),
+			StructuredModel:        envString("CHAT_STRUCTURED_EXTRACT_MODEL", ""),
+		},
+		Proactive: ProactiveConfig{
+			Enabled:                 envBool("PROACTIVE_ENABLED", true),
+			ScanIntervalSec:         envInt("PROACTIVE_SCAN_INTERVAL_SEC", 60),
+			ReminderScanIntervalSec: envInt("PROACTIVE_REMINDER_SCAN_INTERVAL_SEC", 5),
+			FeedbackIntervalSec:     envInt("PROACTIVE_FEEDBACK_INTERVAL_SEC", 300),
+			ReplyWindowHours:        envInt("PROACTIVE_REPLY_WINDOW_HOURS", 24),
+			DefaultTimezone:         envString("PROACTIVE_DEFAULT_TIMEZONE", "Asia/Seoul"),
+			AllowedStartHour:        envInt("PROACTIVE_ALLOWED_START_HOUR", 11),
+			AllowedEndHour:          envInt("PROACTIVE_ALLOWED_END_HOUR", 22),
+			ReconnectIdleHours:      envInt("PROACTIVE_RECONNECT_IDLE_HOURS", 72),
+			EventLookaheadHours:     envInt("PROACTIVE_EVENT_LOOKAHEAD_HOURS", 3),
+			EventFollowupGraceHours: envInt("PROACTIVE_EVENT_FOLLOWUP_GRACE_HOURS", 3),
+			MaxCandidatesPerScan:    envInt("PROACTIVE_MAX_CANDIDATES_PER_SCAN", 100),
+			ReminderModel:           envString("PROACTIVE_REMINDER_MODEL", ""),
+		},
+		Holiday: HolidayConfig{
+			SyncEnabled:       envBool("HOLIDAY_SYNC_ENABLED", true),
+			APIServiceKey:     strings.TrimSpace(os.Getenv("HOLIDAY_API_SERVICE_KEY")),
+			APIBaseURL:        envString("HOLIDAY_API_BASE_URL", "http://apis.data.go.kr/B090041/openapi/service/SpcdeInfoService"),
+			SyncIntervalHours: envInt("HOLIDAY_SYNC_INTERVAL_HOURS", 24),
+			LookaheadDays:     envInt("HOLIDAY_LOOKAHEAD_DAYS", 7),
+			PromptTodayPct:    envInt("HOLIDAY_PROMPT_TODAY_PERCENT", 40),
+			PromptUpcomingPct: envInt("HOLIDAY_PROMPT_UPCOMING_PERCENT", 25),
 		},
 	}
 
@@ -116,6 +172,10 @@ func (c Config) Validate() error {
 
 	if c.Storage.RedisURL == "" {
 		missing = append(missing, "REDIS_URL")
+	}
+
+	if c.Holiday.SyncEnabled && c.Holiday.APIServiceKey == "" {
+		missing = append(missing, "HOLIDAY_API_SERVICE_KEY")
 	}
 
 	if len(missing) > 0 {
@@ -182,4 +242,20 @@ func envCSV(key string, fallback []string) []string {
 	}
 
 	return result
+}
+
+func envBool(key string, fallback bool) bool {
+	value := strings.TrimSpace(strings.ToLower(os.Getenv(key)))
+	if value == "" {
+		return fallback
+	}
+
+	switch value {
+	case "1", "true", "yes", "y", "on":
+		return true
+	case "0", "false", "no", "n", "off":
+		return false
+	default:
+		return fallback
+	}
 }
