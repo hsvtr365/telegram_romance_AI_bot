@@ -5,20 +5,24 @@ import (
 	"strings"
 
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/ollama"
+	"github.com/hsvtr365/telegram_romance_AI_bot/internal/promptutil"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/store/model"
 )
 
 type PromptInput struct {
-	UserInput          string
-	MemorySummary      string
-	RecentConversation []ollama.Message
-	UserProfile        model.UserProfile
-	UserTraits         []model.UserTrait
-	ProfilePrompt      profilePromptContext
-	HolidayContextText string
-	UserTurnCount      int
-	ConversationPhase  string
-	CurrentTimeText    string
+	UserInput             string
+	MemorySummary         string
+	RecentConversation    []ollama.Message
+	UserProfile           model.UserProfile
+	UserTraits            []model.UserTrait
+	ProfilePrompt         profilePromptContext
+	HolidayContextText    string
+	UserTurnCount         int
+	ConversationPhase     string
+	CurrentTimeText       string
+	ActiveTopicsText      string
+	ConversationStateText string
+	OpenLoopsText         string
 }
 
 type PromptBuilder struct{}
@@ -30,65 +34,43 @@ func NewPromptBuilder() *PromptBuilder {
 func (b *PromptBuilder) Build(input PromptInput) []ollama.Message {
 	var userSection strings.Builder
 
-	if strings.TrimSpace(input.MemorySummary) != "" {
-		userSection.WriteString("[Memory Summary]\n")
-		userSection.WriteString(strings.TrimSpace(input.MemorySummary))
-		userSection.WriteString("\n\n")
-	}
+	promptutil.WriteSection(&userSection, "Active Topic Slots", input.ActiveTopicsText)
+	promptutil.WriteSection(&userSection, "Conversation State", input.ConversationStateText)
+	promptutil.WriteSection(&userSection, "Open Loops", input.OpenLoopsText)
+	promptutil.WriteSection(&userSection, "Memory Summary", input.MemorySummary)
 
 	if len(input.RecentConversation) > 0 {
-		userSection.WriteString("[Recent Conversation]\n")
+		messages := make([]promptutil.MessageLine, 0, len(input.RecentConversation))
 		for _, msg := range input.RecentConversation {
-			userSection.WriteString(fmt.Sprintf("%s: %s\n", msg.Role, strings.TrimSpace(msg.Content)))
+			messages = append(messages, promptutil.MessageLine{Role: msg.Role, Content: msg.Content})
 		}
-		userSection.WriteString("\n")
+		promptutil.WriteConversation(&userSection, "Recent Conversation", messages)
 	} else {
-		userSection.WriteString("[Conversation State]\n")
-		userSection.WriteString("최근 대화 맥락이 없음. 첫 대화 또는 리셋 직후처럼 반응할 것. 예전부터 알던 사이처럼 말하지 말고, 오랜만이라고 하거나 기억난다고 아는 척하지 않는다.\n\n")
+		promptutil.WriteSection(&userSection, "Conversation State", "최근 대화 맥락이 없음. 첫 대화 또는 리셋 직후처럼 반응할 것. 예전부터 알던 사이처럼 말하지 말고, 오랜만이라고 하거나 기억난다고 아는 척하지 않는다.")
 	}
 
 	if input.UserTurnCount > 0 && input.UserTurnCount <= 6 {
-		userSection.WriteString("[Interaction Pace]\n")
-		userSection.WriteString("아직 초반 대화다. 부담 없이 가볍게 이어가고, 한 턴에 질문은 많아야 하나만 쓴다. 과한 칭찬, 평가, 플러팅은 줄이고 편한 티키타카를 우선한다. 친한 사이였던 것처럼 서사를 만들지 않는다.\n\n")
+		promptutil.WriteSection(&userSection, "Interaction Pace", "아직 초반 대화다. 부담 없이 가볍게 이어가고, 한 턴에 질문은 많아야 하나만 쓴다. 과한 칭찬, 평가, 플러팅은 줄이고 편한 티키타카를 우선한다. 친한 사이였던 것처럼 서사를 만들지 않는다.")
 	}
 
-	if strings.TrimSpace(input.CurrentTimeText) != "" {
-		userSection.WriteString("[Current Time]\n")
-		userSection.WriteString(strings.TrimSpace(input.CurrentTimeText))
-		userSection.WriteString("\n\n")
-	}
-
-	if strings.TrimSpace(input.HolidayContextText) != "" {
-		userSection.WriteString(strings.TrimSpace(input.HolidayContextText))
-		userSection.WriteString("\n\n")
-	}
-
-	userSection.WriteString("[Conversation Phase]\n")
-	userSection.WriteString(conversationPhaseInstruction(input.ConversationPhase))
-	userSection.WriteString("\n\n")
-
-	userSection.WriteString("[Chat Boundary]\n")
-	userSection.WriteString("이 대화는 텔레그램 채팅 안에서만 이어진다. 같은 공간에 있거나 곧 실제로 만날 것처럼 말하지 않는다.\n\n")
+	promptutil.WriteSection(&userSection, "Current Time", input.CurrentTimeText)
+	promptutil.WriteRawBlock(&userSection, input.HolidayContextText)
+	promptutil.WriteSection(&userSection, "Conversation Phase", conversationPhaseInstruction(input.ConversationPhase))
+	promptutil.WriteSection(&userSection, "Chat Boundary", "이 대화는 텔레그램 채팅 안에서만 이어진다. 같은 공간에 있거나 곧 실제로 만날 것처럼 말하지 않는다.")
 
 	if summary := profileSummary(input.UserProfile); summary != "" {
-		userSection.WriteString("[Known User Profile]\n")
-		userSection.WriteString(summary)
-		userSection.WriteString("\n\n")
+		promptutil.WriteSection(&userSection, "Known User Profile", summary)
 	}
 
 	if summary := userTraitsSummary(input.UserTraits); summary != "" {
-		userSection.WriteString("[Known User Traits]\n")
-		userSection.WriteString(summary)
-		userSection.WriteString("\n\n")
+		promptutil.WriteSection(&userSection, "Known User Traits", summary)
 	}
 
 	if input.ProfilePrompt.Enabled && strings.TrimSpace(input.ProfilePrompt.Instruction) != "" {
-		userSection.WriteString(input.ProfilePrompt.Instruction)
-		userSection.WriteString("\n\n")
+		promptutil.WriteRawBlock(&userSection, input.ProfilePrompt.Instruction)
 	}
 
-	userSection.WriteString("[Current User Input]\n")
-	userSection.WriteString(strings.TrimSpace(input.UserInput))
+	promptutil.WriteSection(&userSection, "Current User Input", input.UserInput)
 
 	return []ollama.Message{
 		{Role: "system", Content: BaseSystemPrompt()},

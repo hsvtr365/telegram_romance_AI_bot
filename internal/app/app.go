@@ -69,6 +69,21 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		logger,
 	)
 
+	memorySlotLLM := buildVariantLLM(
+		ollamaClient,
+		cfg.Ollama,
+		cfg.Chat.MemorySlotModel,
+		func(base ollama.Config) ollama.Config {
+			base.TimeoutSec = maxInt(8, minInt(base.TimeoutSec, 15))
+			base.KeepAlive = "3m"
+			base.NumCtx = minInt(base.NumCtx, 1024)
+			base.Temperature = 0.2
+			base.TopP = 0.8
+			return base
+		},
+		logger,
+	)
+
 	conversationStore, err := store.New(ctx, store.Config{
 		PostgresDSN: cfg.Storage.PostgresDSN,
 		RedisURL:    cfg.Storage.RedisURL,
@@ -82,7 +97,13 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		ResponseMaxChars:          cfg.Chat.ResponseMaxChars,
 		StructuredExtractEnabled:  cfg.Chat.StructuredExtract,
 		StructuredExtractMinChars: cfg.Chat.StructuredMinChars,
-	}, tgClient, ollamaClient, reminderLLM, structuredLLM, conversationStore, logger)
+		MemorySlotEnabled:         cfg.Chat.MemorySlotEnabled,
+		MemorySlotMinChars:        cfg.Chat.MemorySlotMinChars,
+		MemorySlotSyncTimeoutMs:   cfg.Chat.MemorySlotSyncTimeoutMs,
+		MemorySlotAsyncTimeoutMs:  cfg.Chat.MemorySlotAsyncTimeoutMs,
+		MemorySlotWorkers:         cfg.Chat.MemorySlotWorkers,
+		MemorySlotQueueSize:       cfg.Chat.MemorySlotQueueSize,
+	}, tgClient, ollamaClient, reminderLLM, structuredLLM, memorySlotLLM, conversationStore, logger)
 
 	holidayResolver := holiday.NewResolver(conversationStore, holiday.ResolverConfig{
 		LookaheadDays:   cfg.Holiday.LookaheadDays,
@@ -145,6 +166,7 @@ func (a *App) Run(ctx context.Context) error {
 		"ollama_model", a.cfg.Ollama.Model,
 		"reminder_model", coalesce(a.cfg.Proactive.ReminderModel, a.cfg.Ollama.Model),
 		"structured_model", coalesce(a.cfg.Chat.StructuredModel, a.cfg.Ollama.Model),
+		"memory_slot_model", coalesce(a.cfg.Chat.MemorySlotModel, a.cfg.Ollama.Model),
 	)
 
 	errCh := make(chan error, 4)

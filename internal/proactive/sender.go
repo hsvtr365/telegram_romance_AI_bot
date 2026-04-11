@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/hsvtr365/telegram_romance_AI_bot/internal/chat"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/holiday"
 )
 
@@ -100,7 +101,7 @@ func (s *Sender) Send(ctx context.Context, session SessionSnapshot, decision Dec
 }
 
 func (s *Sender) sendText(ctx context.Context, chatID int64, text string) error {
-	parts := splitReplyForTelegram(text)
+	parts := chat.SplitReplyForTelegram(text)
 	if len(parts) == 0 {
 		parts = []string{text}
 	}

@@ -188,6 +188,13 @@ INSERT INTO tg_memory_events (
     priority,
     used_for_proactive
 ) VALUES ($1, NULLIF($2, 0), $3, $4, COALESCE($5::jsonb, '{}'::jsonb), $6, $7, $8)
+ON CONFLICT (session_id, event_type, event_subtype, event_time) DO UPDATE
+SET
+    message_id = COALESCE(NULLIF(EXCLUDED.message_id, 0), tg_memory_events.message_id),
+    event_value = EXCLUDED.event_value,
+    priority = EXCLUDED.priority,
+    used_for_proactive = EXCLUDED.used_for_proactive,
+    updated_at = NOW()
 RETURNING
     id,
     session_id,

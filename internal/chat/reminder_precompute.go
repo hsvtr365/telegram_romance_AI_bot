@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"strings"
@@ -24,7 +25,11 @@ func (s *Service) prepareReminderMessage(ctx context.Context, rawInput string, d
 	reply, err := s.reminderLLM.Chat(genCtx, buildReminderPrecomputePrompt(rawInput, dueAt, requestedAt, fallback))
 	if err != nil {
 		if s.logger != nil {
-			s.logger.Warn("failed to precompute reminder message", "error", err)
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				s.logger.Debug("skipping reminder precompute and using fallback", "error", err)
+			} else {
+				s.logger.Warn("failed to precompute reminder message", "error", err)
+			}
 		}
 		return fallback, "fallback"
 	}

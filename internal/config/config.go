@@ -46,14 +46,21 @@ type StorageConfig struct {
 }
 
 type ChatConfig struct {
-	RecentTurnLimit        int
-	SummaryTriggerMessages int
-	SessionLockTTLSec      int
-	CooldownSec            int
-	ResponseMaxChars       int
-	StructuredExtract      bool
-	StructuredMinChars     int
-	StructuredModel        string
+	RecentTurnLimit          int
+	SummaryTriggerMessages   int
+	SessionLockTTLSec        int
+	CooldownSec              int
+	ResponseMaxChars         int
+	StructuredExtract        bool
+	StructuredMinChars       int
+	StructuredModel          string
+	MemorySlotEnabled        bool
+	MemorySlotModel          string
+	MemorySlotMinChars       int
+	MemorySlotSyncTimeoutMs  int
+	MemorySlotAsyncTimeoutMs int
+	MemorySlotWorkers        int
+	MemorySlotQueueSize      int
 }
 
 type ProactiveConfig struct {
@@ -113,14 +120,21 @@ func Load(dotenvPath string) (Config, error) {
 			RedisURL:    strings.TrimSpace(os.Getenv("REDIS_URL")),
 		},
 		Chat: ChatConfig{
-			RecentTurnLimit:        envInt("RECENT_TURN_LIMIT", 14),
-			SummaryTriggerMessages: envInt("SUMMARY_TRIGGER_MESSAGES", 10),
-			SessionLockTTLSec:      envInt("SESSION_LOCK_TTL_SEC", 20),
-			CooldownSec:            envInt("CHAT_COOLDOWN_SEC", 2),
-			ResponseMaxChars:       envInt("RESPONSE_MAX_CHARS", 0),
-			StructuredExtract:      envBool("CHAT_STRUCTURED_EXTRACT_ENABLED", true),
-			StructuredMinChars:     envInt("CHAT_STRUCTURED_EXTRACT_MIN_CHARS", 12),
-			StructuredModel:        envString("CHAT_STRUCTURED_EXTRACT_MODEL", ""),
+			RecentTurnLimit:          envInt("RECENT_TURN_LIMIT", 14),
+			SummaryTriggerMessages:   envInt("SUMMARY_TRIGGER_MESSAGES", 10),
+			SessionLockTTLSec:        envInt("SESSION_LOCK_TTL_SEC", 20),
+			CooldownSec:              envInt("CHAT_COOLDOWN_SEC", 2),
+			ResponseMaxChars:         envInt("RESPONSE_MAX_CHARS", 0),
+			StructuredExtract:        envBool("CHAT_STRUCTURED_EXTRACT_ENABLED", true),
+			StructuredMinChars:       envInt("CHAT_STRUCTURED_EXTRACT_MIN_CHARS", 12),
+			StructuredModel:          envString("CHAT_STRUCTURED_EXTRACT_MODEL", ""),
+			MemorySlotEnabled:        envBool("CHAT_MEMORY_SLOT_ENABLED", false),
+			MemorySlotModel:          envString("CHAT_MEMORY_SLOT_MODEL", ""),
+			MemorySlotMinChars:       envInt("CHAT_MEMORY_SLOT_MIN_CHARS", 16),
+			MemorySlotSyncTimeoutMs:  envInt("CHAT_MEMORY_SLOT_SYNC_TIMEOUT_MS", 700),
+			MemorySlotAsyncTimeoutMs: envInt("CHAT_MEMORY_SLOT_ASYNC_TIMEOUT_MS", 6000),
+			MemorySlotWorkers:        envInt("CHAT_MEMORY_SLOT_WORKERS", 2),
+			MemorySlotQueueSize:      envInt("CHAT_MEMORY_SLOT_QUEUE_SIZE", 32),
 		},
 		Proactive: ProactiveConfig{
 			Enabled:                 envBool("PROACTIVE_ENABLED", true),

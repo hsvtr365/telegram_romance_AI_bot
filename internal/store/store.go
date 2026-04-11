@@ -23,6 +23,8 @@ type ConversationContext struct {
 	User               model.User
 	UserProfile        model.UserProfile
 	UserTraits         []model.UserTrait
+	TopicSlots         []model.TopicSlot
+	ConversationState  model.ConversationStateSlot
 	Session            model.Session
 	RecentConversation []ollama.Message
 }
@@ -121,23 +123,24 @@ func (m *Manager) BootstrapContext(ctx context.Context, message telegram.Message
 	}, nil
 }
 
-func (m *Manager) SaveTurn(ctx context.Context, sessionID int64, role string, content string, telegramMessageID int64, updateID int64, mode string, recentTurnLimit int) error {
+func (m *Manager) SaveTurnRecord(ctx context.Context, sessionID int64, role string, content string, telegramMessageID int64, updateID int64, mode string, recentTurnLimit int) (model.Message, error) {
 	content = strings.TrimSpace(content)
 	if sessionID == 0 || content == "" {
-		return nil
+		return model.Message{}, nil
 	}
 
 	now := time.Now()
 
-	if _, err := m.postgres.InsertMessage(ctx, pgstore.InsertMessageParams{
+	record, err := m.postgres.InsertMessage(ctx, pgstore.InsertMessageParams{
 		SessionID:         sessionID,
 		TelegramMessageID: telegramMessageID,
 		TelegramUpdateID:  updateID,
 		Role:              role,
 		Content:           content,
 		Mode:              mode,
-	}); err != nil {
-		return err
+	})
+	if err != nil {
+		return model.Message{}, err
 	}
 
 	if err := m.postgres.TouchSessionMessage(ctx, sessionID, role, now); err != nil {
@@ -152,7 +155,12 @@ func (m *Manager) SaveTurn(ctx context.Context, sessionID int64, role string, co
 		m.logger.Warn("failed to update recent chat cache", "session_id", sessionID, "error", err)
 	}
 
-	return nil
+	return record, nil
+}
+
+func (m *Manager) SaveTurn(ctx context.Context, sessionID int64, role string, content string, telegramMessageID int64, updateID int64, mode string, recentTurnLimit int) error {
+	_, err := m.SaveTurnRecord(ctx, sessionID, role, content, telegramMessageID, updateID, mode, recentTurnLimit)
+	return err
 }
 
 func (m *Manager) ResetConversation(ctx context.Context, telegramUserID int64) (ResetResult, error) {
@@ -284,6 +292,10 @@ func (m *Manager) ReplaceSpecialDaysForMonthKind(ctx context.Context, year int, 
 	return m.postgres.ReplaceSpecialDaysForMonthKind(ctx, year, month, kindCode, items)
 }
 
+func (m *Manager) HasAnySpecialDays(ctx context.Context) (bool, error) {
+	return m.postgres.HasAnySpecialDays(ctx)
+}
+
 func (m *Manager) ListSpecialDays(ctx context.Context, from time.Time, to time.Time) ([]model.SpecialDay, error) {
 	return m.postgres.ListSpecialDays(ctx, from, to)
 }
@@ -326,6 +338,60 @@ func (m *Manager) ListActiveProactiveSessions(ctx context.Context, limit int) ([
 
 func (m *Manager) ListConversationMessages(ctx context.Context, sessionID int64, limit int) ([]model.Message, error) {
 	return m.postgres.ListConversationMessages(ctx, sessionID, limit)
+}
+
+func (m *Manager) ListActiveTopicSlots(ctx context.Context, sessionID int64, limit int) ([]model.TopicSlot, error) {
+	return m.postgres.ListActiveTopicSlots(ctx, sessionID, limit)
+}
+
+func (m *Manager) UpsertTopicSlots(ctx context.Context, sessionID int64, slots []model.TopicSlot) ([]model.TopicSlot, error) {
+	if sessionID == 0 || len(slots) == 0 {
+		return nil, nil
+	}
+
+	updated := make([]model.TopicSlot, 0, len(slots))
+	for _, slot := range slots {
+		slot.SessionID = sessionID
+		record, err := m.postgres.UpsertTopicSlot(ctx, slot)
+		if err != nil {
+			return updated, err
+		}
+		updated = append(updated, record)
+	}
+	return updated, nil
+}
+
+func (m *Manager) GetConversationStateSlot(ctx context.Context, sessionID int64) (model.ConversationStateSlot, error) {
+	return m.postgres.GetConversationStateSlot(ctx, sessionID)
+}
+
+func (m *Manager) UpsertConversationStateSlot(ctx context.Context, sessionID int64, slot model.ConversationStateSlot) (model.ConversationStateSlot, error) {
+	slot.SessionID = sessionID
+	return m.postgres.UpsertConversationStateSlot(ctx, slot)
+}
+
+func (m *Manager) BuildMemorySlotSnapshot(ctx context.Context, sessionID int64, recentTurnLimit int) (model.MemorySlotSnapshot, error) {
+	recentMessages, err := m.postgres.ListConversationMessages(ctx, sessionID, recentTurnLimit)
+	if err != nil {
+		return model.MemorySlotSnapshot{}, err
+	}
+
+	topicSlots, err := m.postgres.ListActiveTopicSlots(ctx, sessionID, 10)
+	if err != nil {
+		return model.MemorySlotSnapshot{}, err
+	}
+
+	conversationState, err := m.postgres.GetConversationStateSlot(ctx, sessionID)
+	if err != nil {
+		return model.MemorySlotSnapshot{}, err
+	}
+
+	return model.MemorySlotSnapshot{
+		SessionID:         sessionID,
+		RecentMessages:    recentMessages,
+		TopicSlots:        topicSlots,
+		ConversationState: conversationState,
+	}, nil
 }
 
 func (m *Manager) AcquireProactiveLock(ctx context.Context, sessionID int64, workerID string, ttl time.Duration) (bool, error) {

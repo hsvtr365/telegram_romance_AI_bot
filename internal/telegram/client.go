@@ -116,6 +116,9 @@ func (c *Client) call(ctx context.Context, method string, apiMethod string, para
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		return err
 	}
 	defer resp.Body.Close()

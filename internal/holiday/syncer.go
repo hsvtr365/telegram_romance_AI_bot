@@ -2,6 +2,7 @@ package holiday
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -11,6 +12,7 @@ import (
 
 type SyncStore interface {
 	ReplaceSpecialDaysForMonthKind(ctx context.Context, year int, month time.Month, kindCode string, items []model.SpecialDay) error
+	HasAnySpecialDays(ctx context.Context) (bool, error)
 }
 
 type Fetcher interface {
@@ -69,12 +71,34 @@ func (s *Syncer) Run(ctx context.Context) error {
 }
 
 func (s *Syncer) syncRange(ctx context.Context, now time.Time) {
+	hasAny, err := s.store.HasAnySpecialDays(ctx)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Warn("holiday sync precheck failed", "error", err)
+		}
+		return
+	}
+	if hasAny {
+		return
+	}
+
 	years := []int{now.Year(), now.Year() + 1}
 	for _, year := range years {
 		for month := time.January; month <= time.December; month++ {
 			for _, kind := range SupportedKinds {
-				if err := s.syncMonth(ctx, kind, year, month); err != nil && s.logger != nil {
-					s.logger.Warn("holiday month sync failed", "kind", kind.Endpoint, "year", year, "month", int(month), "error", err)
+				if err := s.syncMonth(ctx, kind, year, month); err != nil {
+					if errors.Is(err, context.Canceled) {
+						return
+					}
+					if errors.Is(err, ErrUnauthorized) {
+						if s.logger != nil {
+							s.logger.Warn("holiday sync disabled due to unauthorized API key", "kind", kind.Endpoint, "year", year, "month", int(month))
+						}
+						return
+					}
+					if s.logger != nil {
+						s.logger.Warn("holiday month sync failed", "kind", kind.Endpoint, "year", year, "month", int(month), "error", err)
+					}
 				}
 			}
 		}

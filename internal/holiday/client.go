@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -58,6 +59,8 @@ type apiItem struct {
 	Seq       string `xml:"seq"`
 }
 
+var ErrUnauthorized = errors.New("holiday api unauthorized")
+
 func NewClient(serviceKey string, timeout time.Duration) *Client {
 	if timeout <= 0 {
 		timeout = 15 * time.Second
@@ -98,12 +101,18 @@ func (c *Client) FetchMonth(ctx context.Context, kind SpecialDayKind, year int, 
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		if resp.StatusCode == http.StatusUnauthorized {
+			return nil, fmt.Errorf("%w: %s", ErrUnauthorized, strings.TrimSpace(string(body)))
+		}
 		return nil, fmt.Errorf("holiday api status=%d body=%q", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 

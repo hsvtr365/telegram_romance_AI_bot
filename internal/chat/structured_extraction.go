@@ -17,7 +17,11 @@ type StructuredExtractor struct {
 	minChars int
 }
 
-const structuredExtractTimeout = 8 * time.Second
+const (
+	structuredExtractTimeout   = 8 * time.Second
+	structuredExtractWorkers   = 2
+	structuredExtractQueueSize = 32
+)
 
 type structuredField struct {
 	Value      string `json:"value"`
@@ -59,7 +63,7 @@ func NewStructuredExtractor(llm LLM, minChars int) *StructuredExtractor {
 	}
 }
 
-func (s *Service) captureUserSignals(ctx context.Context, userID int64, input string, conversation *store.ConversationContext) {
+func (s *Service) captureUserSignals(ctx context.Context, userID int64, input string, conversation *store.ConversationContext, sourceVersion int64) {
 	if s.store == nil || userID == 0 || conversation == nil {
 		return
 	}
@@ -95,27 +99,56 @@ func (s *Service) captureUserSignals(ctx context.Context, userID int64, input st
 	}
 
 	if s.shouldUseStructuredExtraction(input, profilePatch, traits) {
-		s.dispatchStructuredExtraction(userID, input)
+		s.dispatchStructuredExtraction(userID, input, sourceVersion)
 	}
 }
 
-func (s *Service) dispatchStructuredExtraction(userID int64, input string) {
-	if s == nil || s.extractor == nil || s.store == nil || userID == 0 {
+func (s *Service) dispatchStructuredExtraction(userID int64, input string, sourceVersion int64) {
+	if s == nil || s.extractor == nil || s.store == nil || s.structuredRunner == nil || userID == 0 {
 		return
 	}
 
-	go func() {
-		bgCtx, cancel := context.WithTimeout(context.Background(), structuredExtractTimeout)
-		defer cancel()
+	if sourceVersion <= 0 {
+		sourceVersion = time.Now().UnixNano()
+	}
 
-		extracted, err := s.extractor.Extract(bgCtx, input)
-		if err != nil {
-			s.logger.Warn("structured extraction failed", "user_id", userID, "error", err)
-			return
-		}
-
-		s.persistStructuredExtraction(bgCtx, userID, input, extracted)
-	}()
+	s.structuredRunner.Enqueue(AsyncTask{
+		Key:     structuredExtractionTaskKey(userID),
+		Version: sourceVersion,
+		Build: func(ctx context.Context) (func(context.Context) error, error) {
+			extracted, err := s.extractor.Extract(ctx, input)
+			if err != nil {
+				s.logger.Warn("structured extraction failed", "user_id", userID, "error", err)
+				return nil, err
+			}
+			return func(commitCtx context.Context) error {
+				s.persistStructuredExtraction(commitCtx, userID, input, extracted)
+				return nil
+			}, nil
+		},
+		OnDrop: func(_ string, queueDepth int) {
+			if s.logger != nil {
+				s.logger.Warn("structured extraction queue full", "queue_depth", queueDepth, "user_id", userID)
+			}
+		},
+		OnSuperseded: func(stage string) {
+			if s.logger != nil {
+				s.logger.Debug("structured extraction superseded", "stage", stage, "user_id", userID)
+			}
+		},
+		OnComplete: func(duration time.Duration, err error, queueDepth int) {
+			if s.logger == nil || err != nil {
+				return
+			}
+			s.logger.Debug(
+				"structured extraction completed",
+				"metric", "structured_extract.total_ms",
+				"duration_ms", duration.Milliseconds(),
+				"queue_depth", queueDepth,
+				"user_id", userID,
+			)
+		},
+	})
 }
 
 func (s *Service) persistStructuredExtraction(ctx context.Context, userID int64, input string, extracted structuredExtractionPayload) {
@@ -196,6 +229,10 @@ Schema:
 	}
 
 	return parseStructuredExtractionPayload(raw)
+}
+
+func structuredExtractionTaskKey(userID int64) string {
+	return fmt.Sprintf("structured_extract:%d", userID)
 }
 
 func parseStructuredExtractionPayload(raw string) (structuredExtractionPayload, error) {

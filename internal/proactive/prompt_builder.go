@@ -6,6 +6,7 @@ import (
 
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/chat"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/ollama"
+	"github.com/hsvtr365/telegram_romance_AI_bot/internal/promptutil"
 )
 
 type PromptInput struct {
@@ -32,46 +33,26 @@ func (b *PromptBuilder) Build(input PromptInput) []ollama.Message {
 
 	var userSection strings.Builder
 
-	userSection.WriteString("[Proactive Context]\n")
-	userSection.WriteString(fmt.Sprintf("trigger_type: %s\n", input.Candidate.TriggerType))
-	userSection.WriteString(fmt.Sprintf("trigger_ref_id: %s\n", input.Candidate.TriggerRefID))
-	userSection.WriteString(fmt.Sprintf("purpose: %s\n", input.Strategy.Purpose))
-	userSection.WriteString(fmt.Sprintf("tone: %s\n", input.Strategy.Tone))
-	userSection.WriteString(fmt.Sprintf("intensity: %s\n", input.Strategy.Intensity))
-	userSection.WriteString(fmt.Sprintf("length: %s\n", input.Strategy.Length))
-	userSection.WriteString(fmt.Sprintf("seed: %s\n", strings.TrimSpace(input.Seed.Text)))
-	userSection.WriteString("\n")
+	promptutil.WriteLinesSection(&userSection, "Proactive Context", []string{
+		fmt.Sprintf("trigger_type: %s", input.Candidate.TriggerType),
+		fmt.Sprintf("trigger_ref_id: %s", input.Candidate.TriggerRefID),
+		fmt.Sprintf("purpose: %s", input.Strategy.Purpose),
+		fmt.Sprintf("tone: %s", input.Strategy.Tone),
+		fmt.Sprintf("intensity: %s", input.Strategy.Intensity),
+		fmt.Sprintf("length: %s", input.Strategy.Length),
+		fmt.Sprintf("seed: %s", strings.TrimSpace(input.Seed.Text)),
+	})
 
-	if strings.TrimSpace(input.RelationshipNote) != "" {
-		userSection.WriteString("[Relationship Note]\n")
-		userSection.WriteString(strings.TrimSpace(input.RelationshipNote))
-		userSection.WriteString("\n\n")
-	}
+	promptutil.WriteSection(&userSection, "Relationship Note", input.RelationshipNote)
+	promptutil.WriteSection(&userSection, "Event Note", input.EventNote)
+	promptutil.WriteSection(&userSection, "Memory Summary", input.MemorySummary)
+	promptutil.WriteRawBlock(&userSection, input.HolidayContextText)
 
-	if strings.TrimSpace(input.EventNote) != "" {
-		userSection.WriteString("[Event Note]\n")
-		userSection.WriteString(strings.TrimSpace(input.EventNote))
-		userSection.WriteString("\n\n")
+	messages := make([]promptutil.MessageLine, 0, len(input.RecentConversation))
+	for _, msg := range input.RecentConversation {
+		messages = append(messages, promptutil.MessageLine{Role: msg.Role, Content: msg.Content})
 	}
-
-	if strings.TrimSpace(input.MemorySummary) != "" {
-		userSection.WriteString("[Memory Summary]\n")
-		userSection.WriteString(strings.TrimSpace(input.MemorySummary))
-		userSection.WriteString("\n\n")
-	}
-
-	if strings.TrimSpace(input.HolidayContextText) != "" {
-		userSection.WriteString(strings.TrimSpace(input.HolidayContextText))
-		userSection.WriteString("\n\n")
-	}
-
-	if len(input.RecentConversation) > 0 {
-		userSection.WriteString("[Recent Conversation]\n")
-		for _, msg := range input.RecentConversation {
-			userSection.WriteString(fmt.Sprintf("%s: %s\n", msg.Role, strings.TrimSpace(msg.Content)))
-		}
-		userSection.WriteString("\n")
-	}
+	promptutil.WriteConversation(&userSection, "Recent Conversation", messages)
 
 	systemPrompt := chat.BaseSystemPrompt() + "\n\n" + strings.TrimSpace(`
 추가 역할: 텔레그램 가상연애 봇의 선톡 메시지 작성기.
@@ -97,16 +78,18 @@ func (b *PromptBuilder) Build(input PromptInput) []ollama.Message {
 func (b *PromptBuilder) buildReminder(input PromptInput) []ollama.Message {
 	var userSection strings.Builder
 
-	userSection.WriteString("[Reminder Context]\n")
-	userSection.WriteString(fmt.Sprintf("trigger_ref_id: %s\n", input.Candidate.TriggerRefID))
-	userSection.WriteString(fmt.Sprintf("seed: %s\n", strings.TrimSpace(input.Seed.Text)))
+	lines := []string{
+		fmt.Sprintf("trigger_ref_id: %s", input.Candidate.TriggerRefID),
+		fmt.Sprintf("seed: %s", strings.TrimSpace(input.Seed.Text)),
+	}
 	if strings.TrimSpace(input.EventNote) != "" {
-		userSection.WriteString(fmt.Sprintf("event_note: %s\n", strings.TrimSpace(input.EventNote)))
+		lines = append(lines, fmt.Sprintf("event_note: %s", strings.TrimSpace(input.EventNote)))
 	}
 	if len(input.RecentConversation) > 0 {
 		last := input.RecentConversation[len(input.RecentConversation)-1]
-		userSection.WriteString(fmt.Sprintf("latest_message: %s\n", strings.TrimSpace(last.Content)))
+		lines = append(lines, fmt.Sprintf("latest_message: %s", strings.TrimSpace(last.Content)))
 	}
+	promptutil.WriteLinesSection(&userSection, "Reminder Context", lines)
 
 	systemPrompt := strings.TrimSpace(`
 역할: 텔레그램 리마인드 톡 한 줄 작성기.

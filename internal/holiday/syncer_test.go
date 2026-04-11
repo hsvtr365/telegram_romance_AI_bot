@@ -10,12 +10,17 @@ import (
 )
 
 type syncStoreStub struct {
-	calls []string
+	calls  []string
+	hasAny bool
 }
 
 func (s *syncStoreStub) ReplaceSpecialDaysForMonthKind(_ context.Context, year int, month time.Month, kindCode string, items []model.SpecialDay) error {
 	s.calls = append(s.calls, fmt.Sprintf("%d-%02d:%s:%d", year, int(month), kindCode, len(items)))
 	return nil
+}
+
+func (s *syncStoreStub) HasAnySpecialDays(_ context.Context) (bool, error) {
+	return s.hasAny, nil
 }
 
 type fetcherStub struct {
@@ -58,5 +63,19 @@ func TestSyncerSyncRange_ContinuesOnMonthFailure(t *testing.T) {
 	expectedCalls := 24*len(SupportedKinds) - 1
 	if len(store.calls) != expectedCalls {
 		t.Fatalf("expected %d successful replacements, got %d", expectedCalls, len(store.calls))
+	}
+}
+
+func TestSyncerSyncRange_SkipsWhenSpecialDaysAlreadyExist(t *testing.T) {
+	store := &syncStoreStub{hasAny: true}
+	fetcher := &fetcherStub{}
+
+	syncer := NewSyncer(store, fetcher, 24*time.Hour, nil)
+	syncer.clock = fixedClock{now: time.Date(2026, 1, 10, 0, 0, 0, 0, time.UTC)}
+
+	syncer.syncRange(context.Background(), syncer.clock.Now())
+
+	if len(store.calls) != 0 {
+		t.Fatalf("expected no sync calls when holiday data already exists, got %d", len(store.calls))
 	}
 }

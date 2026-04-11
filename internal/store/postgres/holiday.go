@@ -79,6 +79,24 @@ SET
 	return tx.Commit(ctx)
 }
 
+func (s *Store) HasAnySpecialDays(ctx context.Context) (bool, error) {
+	const query = `
+SELECT 1
+FROM tg_special_days
+LIMIT 1
+`
+
+	var exists int
+	err := s.pool.QueryRow(ctx, query).Scan(&exists)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	return false, err
+}
+
 func (s *Store) ListSpecialDays(ctx context.Context, from time.Time, to time.Time) ([]model.SpecialDay, error) {
 	const query = `
 SELECT

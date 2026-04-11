@@ -179,6 +179,18 @@ func (s *Scheduler) handleScannedCandidate(ctx context.Context, item ScannedCand
 
 	composeResult, ok := preparedReminderComposeResult(item.Event)
 	if !ok {
+		memorySummary := ""
+		if s.repo != nil {
+			summary, err := s.repo.GetMemorySummary(ctx, item.Session.SessionID, item.Session.RecentTurnLimit)
+			if err != nil {
+				if s.logger != nil {
+					s.logger.Debug("failed to load proactive memory summary", "session_id", item.Session.SessionID, "error", err)
+				}
+			} else {
+				memorySummary = summary
+			}
+		}
+
 		var err error
 		composeResult, err = s.composer.Compose(ctx, ComposeInput{
 			Session:            item.Session,
@@ -188,6 +200,7 @@ func (s *Scheduler) handleScannedCandidate(ctx context.Context, item ScannedCand
 			RecentConversation: toOllamaMessages(item.RecentMessages),
 			RecentMessages:     item.RecentMessages,
 			RecentProactives:   item.RecentProactives,
+			MemorySummary:      memorySummary,
 			EventNote:          eventNote(item.Event),
 		})
 		if err != nil {

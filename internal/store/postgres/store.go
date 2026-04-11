@@ -305,6 +305,50 @@ CREATE TABLE IF NOT EXISTS tg_session_prompt_topics (
 
 CREATE INDEX IF NOT EXISTS idx_tg_session_prompt_topics_session
     ON tg_session_prompt_topics (session_id ASC, used_at DESC);
+
+CREATE TABLE IF NOT EXISTS tg_topic_slots (
+    id BIGSERIAL PRIMARY KEY,
+    session_id BIGINT NOT NULL REFERENCES tg_chat_sessions(id) ON DELETE CASCADE,
+    slot_key VARCHAR(128) NOT NULL,
+    topic_label VARCHAR(255) NOT NULL,
+    summary TEXT NOT NULL DEFAULT '',
+    status VARCHAR(16) NOT NULL DEFAULT 'watch',
+    importance SMALLINT NOT NULL DEFAULT 50,
+    confidence VARCHAR(16) NOT NULL DEFAULT 'low',
+    source_kind VARCHAR(32) NOT NULL DEFAULT 'memory_slot_ai',
+    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_source_message_id BIGINT REFERENCES tg_chat_messages(id) ON DELETE SET NULL,
+    mention_count INT NOT NULL DEFAULT 1,
+    evidence_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (session_id, slot_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tg_topic_slots_session_status
+    ON tg_topic_slots (session_id ASC, status ASC, importance DESC, last_seen_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_tg_topic_slots_message
+    ON tg_topic_slots (last_source_message_id ASC);
+
+CREATE TABLE IF NOT EXISTS tg_conversation_state_slots (
+    session_id BIGINT PRIMARY KEY REFERENCES tg_chat_sessions(id) ON DELETE CASCADE,
+    current_stage VARCHAR(32) NOT NULL DEFAULT '',
+    stage_direction VARCHAR(32) NOT NULL DEFAULT '',
+    emotional_tone VARCHAR(32) NOT NULL DEFAULT '',
+    interaction_mode VARCHAR(32) NOT NULL DEFAULT '',
+    open_loop_summary TEXT NOT NULL DEFAULT '',
+    focus_topic_key VARCHAR(128) NOT NULL DEFAULT '',
+    confidence VARCHAR(16) NOT NULL DEFAULT 'low',
+    evidence_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    last_source_message_id BIGINT REFERENCES tg_chat_messages(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_tg_conversation_state_slots_message
+    ON tg_conversation_state_slots (last_source_message_id ASC);
 `
 
 	_, err := s.pool.Exec(ctx, schema)

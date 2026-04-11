@@ -30,26 +30,49 @@ type Config struct {
 	ResponseMaxChars          int
 	StructuredExtractEnabled  bool
 	StructuredExtractMinChars int
+	MemorySlotEnabled         bool
+	MemorySlotMinChars        int
+	MemorySlotSyncTimeoutMs   int
+	MemorySlotAsyncTimeoutMs  int
+	MemorySlotWorkers         int
+	MemorySlotQueueSize       int
 }
 
 type Service struct {
-	cfg             Config
-	bot             Messenger
-	llm             LLM
-	reminderLLM     LLM
-	store           *store.Manager
-	prompt          *PromptBuilder
-	extractor       *StructuredExtractor
-	holidayResolver holiday.ContextResolver
-	logger          *slog.Logger
+	cfg              Config
+	bot              Messenger
+	llm              LLM
+	reminderLLM      LLM
+	store            *store.Manager
+	prompt           *PromptBuilder
+	extractor        *StructuredExtractor
+	memoryAnalyzer   *MemorySlotAnalyzer
+	structuredRunner *AsyncRunner
+	holidayResolver  holiday.ContextResolver
+	logger           *slog.Logger
 }
 
-func NewService(cfg Config, bot Messenger, llm LLM, reminderLLM LLM, structuredLLM LLM, conversationStore *store.Manager, logger *slog.Logger) *Service {
+func NewService(cfg Config, bot Messenger, llm LLM, reminderLLM LLM, structuredLLM LLM, memorySlotLLM LLM, conversationStore *store.Manager, logger *slog.Logger) *Service {
 	if cfg.RecentTurnLimit <= 0 {
 		cfg.RecentTurnLimit = 14
 	}
 	if cfg.StructuredExtractMinChars <= 0 {
 		cfg.StructuredExtractMinChars = 12
+	}
+	if cfg.MemorySlotMinChars <= 0 {
+		cfg.MemorySlotMinChars = 16
+	}
+	if cfg.MemorySlotSyncTimeoutMs <= 0 {
+		cfg.MemorySlotSyncTimeoutMs = 700
+	}
+	if cfg.MemorySlotAsyncTimeoutMs <= 0 {
+		cfg.MemorySlotAsyncTimeoutMs = 6000
+	}
+	if cfg.MemorySlotWorkers <= 0 {
+		cfg.MemorySlotWorkers = 2
+	}
+	if cfg.MemorySlotQueueSize <= 0 {
+		cfg.MemorySlotQueueSize = 32
 	}
 
 	var extractor *StructuredExtractor
@@ -57,15 +80,39 @@ func NewService(cfg Config, bot Messenger, llm LLM, reminderLLM LLM, structuredL
 		extractor = NewStructuredExtractor(structuredLLM, cfg.StructuredExtractMinChars)
 	}
 
+	var structuredRunner *AsyncRunner
+	if extractor != nil && conversationStore != nil {
+		structuredRunner = NewAsyncRunner(AsyncRunnerConfig{
+			Workers:   structuredExtractWorkers,
+			QueueSize: structuredExtractQueueSize,
+			Timeout:   structuredExtractTimeout,
+		}, logger)
+	}
+
+	var memoryAnalyzer *MemorySlotAnalyzer
+	if cfg.MemorySlotEnabled && memorySlotLLM != nil {
+		memoryAnalyzer = NewMemorySlotAnalyzer(MemorySlotConfig{
+			Enabled:         cfg.MemorySlotEnabled,
+			MinChars:        cfg.MemorySlotMinChars,
+			SyncTimeout:     time.Duration(cfg.MemorySlotSyncTimeoutMs) * time.Millisecond,
+			AsyncTimeout:    time.Duration(cfg.MemorySlotAsyncTimeoutMs) * time.Millisecond,
+			Workers:         cfg.MemorySlotWorkers,
+			QueueSize:       cfg.MemorySlotQueueSize,
+			RecentTurnLimit: cfg.RecentTurnLimit,
+		}, memorySlotLLM, conversationStore, logger)
+	}
+
 	return &Service{
-		cfg:         cfg,
-		bot:         bot,
-		llm:         llm,
-		reminderLLM: reminderLLM,
-		store:       conversationStore,
-		prompt:      NewPromptBuilder(),
-		extractor:   extractor,
-		logger:      logger,
+		cfg:              cfg,
+		bot:              bot,
+		llm:              llm,
+		reminderLLM:      reminderLLM,
+		store:            conversationStore,
+		prompt:           NewPromptBuilder(),
+		extractor:        extractor,
+		memoryAnalyzer:   memoryAnalyzer,
+		structuredRunner: structuredRunner,
+		logger:           logger,
 	}
 }
 
@@ -102,13 +149,14 @@ func (s *Service) HandleUpdate(ctx context.Context, update telegram.Update) erro
 	profilePrompt := profilePromptContext{}
 	userTurnCount := 0
 	now := promptNow()
+	userMessage := model.Message{}
 	if s.store != nil {
 		stored, err := s.store.BootstrapContext(ctx, *update.Message, DefaultSessionMode, s.cfg.RecentTurnLimit)
 		if err != nil {
 			s.logger.Warn("failed to bootstrap conversation context", "chat_id", update.Message.Chat.ID, "error", err)
 		} else {
 			conversation = stored
-			if err := s.store.SaveTurn(
+			record, err := s.store.SaveTurnRecord(
 				ctx,
 				conversation.Session.ID,
 				"user",
@@ -117,11 +165,18 @@ func (s *Service) HandleUpdate(ctx context.Context, update telegram.Update) erro
 				update.UpdateID,
 				DefaultSessionMode,
 				s.cfg.RecentTurnLimit,
-			); err != nil {
+			)
+			if err != nil {
 				s.logger.Warn("failed to persist user message", "session_id", conversation.Session.ID, "error", err)
+			} else {
+				userMessage = record
 			}
 			s.captureProactiveSignals(ctx, conversation.Session.ID, *update.Message, input)
-			s.captureUserSignals(ctx, conversation.User.ID, input, &conversation)
+			structuredSourceSeq := userMessage.ID
+			if structuredSourceSeq == 0 {
+				structuredSourceSeq = update.UpdateID
+			}
+			s.captureUserSignals(ctx, conversation.User.ID, input, &conversation, structuredSourceSeq)
 			if count, err := s.store.CountUserTurns(ctx, conversation.Session.ID); err != nil {
 				s.logger.Warn("failed to count user turns", "session_id", conversation.Session.ID, "error", err)
 			} else {
@@ -143,6 +198,18 @@ func (s *Service) HandleUpdate(ctx context.Context, update telegram.Update) erro
 				userTurnCount,
 				messageTimestamp(*update.Message),
 			)
+			if s.cfg.MemorySlotEnabled && conversation.Session.ID != 0 {
+				if slots, err := s.store.ListActiveTopicSlots(ctx, conversation.Session.ID, 10); err != nil {
+					s.logger.Warn("failed to load topic slots", "session_id", conversation.Session.ID, "error", err)
+				} else {
+					conversation.TopicSlots = slots
+				}
+				if state, err := s.store.GetConversationStateSlot(ctx, conversation.Session.ID); err != nil {
+					s.logger.Warn("failed to load conversation state slot", "session_id", conversation.Session.ID, "error", err)
+				} else {
+					conversation.ConversationState = state
+				}
+			}
 		}
 	}
 
@@ -169,7 +236,33 @@ func (s *Service) HandleUpdate(ctx context.Context, update telegram.Update) erro
 		holidayContext = holidaySelection.PromptText
 	}
 
-	reply, err := s.generateReply(ctx, now, input, conversation.RecentConversation, conversation.UserProfile, conversation.UserTraits, conversation.Session.ConversationPhase, profilePrompt, holidayContext, userTurnCount)
+	topicsForPrompt := conversation.TopicSlots
+	stateForPrompt := conversation.ConversationState
+	if s.memoryAnalyzer != nil {
+		syncResult, err := s.memoryAnalyzer.SyncAnalyze(ctx, MemorySlotAnalyzeInput{
+			Snapshot: model.MemorySlotSnapshot{
+				SessionID:         conversation.Session.ID,
+				RecentMessages:    memoryMessagesFromRecentConversation(conversation.RecentConversation),
+				TopicSlots:        conversation.TopicSlots,
+				ConversationState: conversation.ConversationState,
+			},
+			CurrentUserInput: input,
+		})
+		if err != nil {
+			s.logger.Debug("memory slot sync analyze skipped", "session_id", conversation.Session.ID, "error", err)
+		} else if syncResult != nil {
+			topicsForPrompt, stateForPrompt = MergeMemorySlotAnalysis(
+				conversation.TopicSlots,
+				conversation.ConversationState,
+				*syncResult,
+				userMessage.ID,
+				messageTimestamp(*update.Message),
+			)
+		}
+	}
+	memorySections := BuildMemoryPromptSections(topicsForPrompt, stateForPrompt)
+
+	reply, err := s.generateReply(ctx, now, input, conversation.RecentConversation, conversation.UserProfile, conversation.UserTraits, conversation.Session.ConversationPhase, profilePrompt, holidayContext, userTurnCount, memorySections)
 	promptGenerated := err == nil
 	if err != nil {
 		s.logger.Error("failed to generate reply", "chat_id", update.Message.Chat.ID, "error", err)
@@ -212,6 +305,10 @@ func (s *Service) HandleUpdate(ctx context.Context, update telegram.Update) erro
 		if err := s.holidayResolver.MarkUsed(ctx, conversation.Session.ID, holiday.SourceChat, *holidaySelection); err != nil {
 			s.logger.Warn("failed to mark holiday topic used", "session_id", conversation.Session.ID, "topic_key", holidaySelection.TopicKey, "error", err)
 		}
+	}
+
+	if s.memoryAnalyzer != nil && conversation.Session.ID != 0 && userMessage.ID != 0 {
+		s.memoryAnalyzer.AsyncEnqueue(conversation.Session.ID, userMessage.ID, input)
 	}
 
 	return nil
@@ -345,17 +442,20 @@ func leftPadTwo(value int) string {
 	return strconv.Itoa(value)
 }
 
-func (s *Service) generateReply(ctx context.Context, now time.Time, input string, recentConversation []ollama.Message, userProfile model.UserProfile, userTraits []model.UserTrait, conversationPhase string, profilePrompt profilePromptContext, holidayContext string, userTurnCount int) (string, error) {
+func (s *Service) generateReply(ctx context.Context, now time.Time, input string, recentConversation []ollama.Message, userProfile model.UserProfile, userTraits []model.UserTrait, conversationPhase string, profilePrompt profilePromptContext, holidayContext string, userTurnCount int, memorySections MemoryPromptSections) (string, error) {
 	messages := s.prompt.Build(PromptInput{
-		UserInput:          input,
-		RecentConversation: recentConversation,
-		UserProfile:        userProfile,
-		UserTraits:         userTraits,
-		ProfilePrompt:      profilePrompt,
-		HolidayContextText: holidayContext,
-		UserTurnCount:      userTurnCount,
-		ConversationPhase:  conversationPhase,
-		CurrentTimeText:    formatPromptCurrentTime(now),
+		UserInput:             input,
+		RecentConversation:    recentConversation,
+		UserProfile:           userProfile,
+		UserTraits:            userTraits,
+		ProfilePrompt:         profilePrompt,
+		HolidayContextText:    holidayContext,
+		UserTurnCount:         userTurnCount,
+		ConversationPhase:     conversationPhase,
+		CurrentTimeText:       formatPromptCurrentTime(now),
+		ActiveTopicsText:      memorySections.ActiveTopicsText,
+		ConversationStateText: memorySections.ConversationStateText,
+		OpenLoopsText:         memorySections.OpenLoopsText,
 	})
 
 	reply, err := s.llm.Chat(ctx, messages)

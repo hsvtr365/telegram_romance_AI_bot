@@ -77,8 +77,8 @@ APP_PORT=8083
 
 TELEGRAM_BOT_TOKEN=...
 
-OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_MODEL=gemma4-e2b-uncensored-q8kp:latest
+OLLAMA_BASE_URL=https://gitlab.swempire.co.kr/ollama
+OLLAMA_MODEL=gemma4-heretic:q4km
 
 POSTGRES_DSN=postgres://...
 REDIS_URL=redis://...
@@ -86,17 +86,17 @@ REDIS_URL=redis://...
 
 ## Ollama 준비
 
-Ollama가 아직 떠 있지 않다면 먼저 올린다.
+기본 설정은 원격 reverse proxy를 사용한다.
 
-```bash
-ollama serve
+```env
+OLLAMA_BASE_URL=https://gitlab.swempire.co.kr/ollama
+OLLAMA_MODEL=gemma4-heretic:q4km
 ```
 
-모델이 없다면 pull 후 확인한다.
+프록시 상태는 아래처럼 확인할 수 있다.
 
 ```bash
-ollama pull gemma4-e2b-uncensored-q8kp:latest
-ollama list
+curl https://gitlab.swempire.co.kr/ollama/api/tags
 ```
 
 다른 모델로 바꾸고 싶으면 `.env`의 `OLLAMA_MODEL`만 바꾸면 된다.

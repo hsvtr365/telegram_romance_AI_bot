@@ -4,12 +4,19 @@
 
 이 문서는 `Telegram Bot API + Go + Ollama + Redis + PostgreSQL` 조합으로 동작하는 1:1 가상연애 챗봇 MVP의 권장 구조를 정의한다.
 
+### 현행화 메모
+
+- 이 문서는 초기 MVP 설계 초안이다. 현재 구현 기준은 [chatbot-harness-baseline.md](/Users/suji/Documents/P2/docs/chatbot-harness-baseline.md), [chatbot-harness-design.md](/Users/suji/Documents/P2/docs/chatbot-harness-design.md), 실제 소스가 우선이다.
+- 현재 메모리 구조는 `recent conversation + profile/traits + memory events + topic slots + conversation state` 조합이다.
+- 구조화 추출과 메모리 슬롯 분석은 [`internal/chat/async_runner.go`](/Users/suji/Documents/P2/internal/chat/async_runner.go) 기반 비동기 후처리로 동작한다.
+- 아래 일부 스키마/패키지 예시는 초기 설계 흔적이므로, 현재 파일명/테이블명과 1:1로 일치하지 않을 수 있다.
+
 핵심 방향은 다음과 같다.
 
 - 초기 수신 방식은 Telegram `long polling`
 - LLM은 Ollama 서버를 통해 호출
 - 모델명은 `.env`에서 교체 가능
-- 최근 대화는 짧게 유지하고, 기억은 요약/프로필 중심으로 분리
+- 최근 대화는 짧게 유지하고, 기억은 구조화 메모리(profile/traits/events/topic slots/state)로 분리
 - API 서버는 얇게 유지하고 책임을 명확히 분리
 
 기본 대화 모드는 `spicy`를 기준으로 설계한다.
@@ -37,8 +44,8 @@
 - 최근 대화 캐시
 - 세션 락
 - 짧은 쿨다운
-- 요약 갱신 대기 상태
-- 장기 메모리 캐시
+- 선톡 락/중복 방지 키
+- 단기 메모리 캐시
 
 #### PostgreSQL
 - 사용자, 세션, 메시지 영속 저장
@@ -61,7 +68,7 @@
 6. 응답을 후처리한 뒤 Telegram `sendMessage` 호출
 7. 사용자/봇 메시지를 Postgres에 저장
 8. 최근 대화 캐시를 Redis에 갱신
-9. 요약 갱신 조건 충족 시 memory worker가 메모리 갱신
+9. 구조화 추출과 메모리 슬롯 비동기 분석이 후속 메모리를 갱신
 
 ### 1.3 권장 배치
 
@@ -83,49 +90,54 @@
 │       └── main.go
 ├── internal/
 │   ├── app/
-│   │   └── app.go
+│   │   ├── app.go
+│   │   ├── proactive_codec.go
+│   │   ├── proactive_mapper.go
+│   │   └── proactive_repository.go
+│   ├── chat/
+│   │   ├── async_runner.go
+│   │   ├── memory_slot_analyzer.go
+│   │   ├── postprocess.go
+│   │   ├── prompt_builder.go
+│   │   ├── service.go
+│   │   └── structured_extraction.go
 │   ├── config/
 │   │   └── config.go
-│   ├── telegram/
-│   │   ├── client.go
-│   │   ├── polling.go
-│   │   ├── webhook.go
-│   │   └── types.go
-│   ├── chat/
-│   │   ├── handler.go
-│   │   ├── service.go
-│   │   ├── prompt_builder.go
-│   │   ├── postprocess.go
-│   │   └── mode.go
-│   ├── memory/
-│   │   ├── service.go
-│   │   ├── short_memory.go
-│   │   ├── medium_memory.go
-│   │   ├── long_memory.go
-│   │   └── summarizer.go
+│   ├── holiday/
+│   │   └── ...
+│   ├── httpserver/
+│   │   └── ...
 │   ├── ollama/
 │   │   ├── client.go
 │   │   └── dto.go
+│   ├── proactive/
+│   │   ├── composer.go
+│   │   ├── prompt_builder.go
+│   │   ├── scanner.go
+│   │   ├── scheduler.go
+│   │   ├── sender.go
+│   │   ├── strategy.go
+│   │   └── templates.go
+│   ├── promptutil/
+│   │   └── sections.go
 │   ├── store/
 │   │   ├── postgres/
-│   │   │   ├── users.go
-│   │   │   ├── sessions.go
-│   │   │   ├── messages.go
-│   │   │   └── memory.go
+│   │   │   ├── memory_slots.go
+│   │   │   ├── proactive.go
+│   │   │   ├── store.go
+│   │   │   ├── user_profile.go
+│   │   │   └── user_trait.go
 │   │   ├── redis/
-│   │   │   ├── recent_chat.go
-│   │   │   ├── lock.go
-│   │   │   └── cache.go
+│   │   │   ├── proactive.go
+│   │   │   └── recent_chat.go
 │   │   └── model/
-│   │       ├── user.go
-│   │       ├── session.go
-│   │       ├── message.go
-│   │       └── memory.go
-│   ├── worker/
-│   │   ├── summary_worker.go
-│   │   └── queue.go
-│   └── service/
-│       └── typing.go
+│   │       └── ...
+│   ├── telegram/
+│   │   ├── client.go
+│   │   ├── polling.go
+│   │   └── types.go
+│   └── textutil/
+│       └── strings.go
 ├── pkg/
 │   └── logx/
 │       └── logger.go
@@ -160,15 +172,18 @@
 - 사용자 메시지 처리의 핵심 흐름
 - 프롬프트 조립
 - 응답 후처리
-- 모드별 말투 반영
-
-#### `internal/memory`
-- short / medium / long memory 조회와 갱신
-- 요약 갱신 로직
+- 구조화 추출과 메모리 슬롯 분석
 
 #### `internal/ollama`
 - Ollama HTTP 클라이언트
 - 요청/응답 DTO
+
+#### `internal/proactive`
+- 선톡 스캔, 적격성, 점수 계산, compose, 발송
+- 선톡용 prompt builder와 템플릿 관리
+
+#### `internal/promptutil`
+- chat / proactive 공용 section 렌더링
 
 #### `internal/store/postgres`
 - Postgres repository 구현
@@ -179,8 +194,8 @@
 #### `internal/store/model`
 - 도메인 모델
 
-#### `internal/worker`
-- 요약 갱신, 이벤트 추출 등 비동기 작업
+#### `internal/textutil`
+- 소형 문자열 helper
 
 #### `pkg/logx`
 - 공용 로깅 유틸
@@ -246,7 +261,7 @@ for {
 
 - `internal/telegram/polling.go` 제거 또는 비활성화
 - `internal/telegram/webhook.go`에서 HTTP handler로 update 수신
-- `chat.Handler` 인터페이스는 그대로 유지
+- `chat.Service` 중심 처리 흐름은 그대로 유지
 
 즉, 내부 채팅 처리 서비스는 그대로 두고 수신 방식만 교체한다.
 
@@ -261,18 +276,18 @@ for {
 3. `users` upsert
 4. `chat_sessions` 조회 또는 생성
 5. Redis session lock 획득
-6. Redis에서 최근 대화 12~16턴 조회
-7. `memory_profile` 조회
-8. `memory_events` 최근 중요 이벤트 조회
-9. 프롬프트 조립
-10. Telegram `typing` 전송
-11. Ollama `/api/chat` 호출
-12. 응답 텍스트 후처리
-13. Telegram `sendMessage`
-14. `chat_messages`에 user/assistant 메시지 저장
-15. Redis 최근 대화 캐시 갱신
-16. 요약 갱신 조건 확인
-17. 조건 충족 시 summary worker enqueue
+6. `BootstrapContext`로 recent/profile/traits 조회
+7. 사용자 메시지 저장
+8. proactive signal / structured extraction / holiday context 계산
+9. 저장된 topic slots / conversation state 조회
+10. 짧은 timeout의 memory slot sync overlay 시도
+11. 프롬프트 조립
+12. Telegram `typing` 전송
+13. Ollama `/api/chat` 호출
+14. 응답 텍스트 후처리
+15. Telegram `sendMessage`
+16. assistant 메시지 저장과 Redis 최근 대화 캐시 갱신
+17. structured extraction / memory slot async analysis enqueue
 18. session lock 해제
 
 ### 4.2 처리 단위
@@ -284,7 +299,7 @@ for {
 
 ## 5. 메모리 구조 설계
 
-최근 원문은 짧게, 나머지는 요약형으로 분리한다.
+최근 원문은 짧게 유지하고, 나머지는 구조화 메모리로 분리한다.
 
 ### 5.1 Short Memory
 
@@ -298,20 +313,20 @@ for {
 - Redis List 또는 JSON 배열
 - 턴 단위 저장 예: `[{role:"user", text:"..."}, ...]`
 
-### 5.2 Medium Memory
+### 5.2 Structured Memory
 
-- 내용: 최근 감정 이벤트/상태 요약
+- 내용: profile, traits, memory events, topic slots, conversation state
 - 예:
-  - 사용자가 삐졌다고 표현함
-  - 오늘 피곤하다고 말함
-  - 최근 애칭 사용 빈도 증가
-- 저장 위치: Postgres + Redis 캐시
+  - 사용자 취미/직업/호칭 선호
+  - 최근 시험/약속/감정 이벤트
+  - 현재 중요한 화제와 대화 진행 단계
+- 저장 위치: Postgres 중심, 일부 recent/cache는 Redis 사용
 - 조회 시점: 프롬프트 조립 직전
-- 갱신 시점: N개 메시지 누적 시 worker가 요약 갱신
+- 갱신 시점: 사용자 메시지 처리 후 구조화 추출 + memory slot async analysis
 
 ### 5.3 Long Memory
 
-- 내용: 관계 설정, 호칭, 스타일 선호, 대화 규칙
+- 내용: 관계 설정, 호칭, 스타일 선호, 대화 규칙 같은 안정적 선호
 - 예:
   - 사용자 호칭: 자기야
   - 봇 호칭: 누나
@@ -326,21 +341,18 @@ for {
 
 ### 5.4 조회 우선순위
 
-1. long memory
-2. medium memory
-3. short memory
+1. short memory
+2. active topic slots / conversation state
+3. profile / traits / memory events
 4. current user input
 
-### 5.5 요약 갱신 기준
+### 5.5 메모리 갱신 기준
 
 권장 기준:
 
-- 새 메시지 8~12개 누적 시
-- 또는 assistant 응답 4~6회마다
-
-MVP 권장값:
-
-- `SUMMARY_TRIGGER_MESSAGES=10`
+- 매 사용자 메시지 후 구조화 추출을 비동기 enqueue
+- 필요 시 작은 모델 sync overlay를 짧은 timeout으로만 시도
+- low confidence 슬롯은 저장 중심으로 두고, prompt 주입은 재등장 후 승격
 
 ---
 
@@ -348,11 +360,8 @@ MVP 권장값:
 
 ### 6.1 테이블 개요
 
-- `users`: Telegram 사용자 식별
-- `chat_sessions`: 사용자별 현재 세션
-- `chat_messages`: 원문 대화 로그
-- `memory_profile`: 장기 메모리
-- `memory_events`: 감정/상태/관계 이벤트
+- 현재 구현은 `tg_users`, `tg_chat_sessions`, `tg_chat_messages`, `tg_user_profiles`, `tg_user_traits`, `tg_memory_events`, `tg_topic_slots`, `tg_conversation_state_slots` 계열을 사용한다.
+- 아래 SQL은 초기 MVP 시점의 개념 예시다. 실제 스키마는 `internal/store/postgres/store.go`, `user_profile.go`, `user_trait.go`, `proactive.go`, `memory_slots.go`를 기준으로 본다.
 
 ### 6.2 SQL DDL
 
@@ -476,7 +485,7 @@ chat:cooldown:{sessionId}
 chat:pending:{sessionId}
 memory:profile:{sessionId}
 memory:events:{sessionId}
-summary:pending:{sessionId}
+analysis:pending:{sessionId}
 telegram:offset:{botName}
 ```
 
@@ -512,8 +521,8 @@ telegram:offset:{botName}
 - 타입: String(JSON)
 - TTL: `6h`
 
-#### `summary:pending:{sessionId}`
-- 요약 갱신 중복 방지
+#### `analysis:pending:{sessionId}`
+- 구조화 추출 / 메모리 슬롯 분석 중복 방지 예시 키
 - 타입: String
 - TTL: `10m`
 
@@ -825,8 +834,8 @@ TELEGRAM_ALLOWED_UPDATES=message
 TELEGRAM_POLL_TIMEOUT_SEC=30
 TELEGRAM_POLL_LIMIT=50
 
-OLLAMA_BASE_URL=http://127.0.0.1:11434
-OLLAMA_MODEL=gemma4:4b
+OLLAMA_BASE_URL=https://gitlab.swempire.co.kr/ollama
+OLLAMA_MODEL=gemma4-heretic:q4km
 OLLAMA_TIMEOUT_SEC=35
 OLLAMA_KEEP_ALIVE=10m
 OLLAMA_NUM_CTX=4096
@@ -968,17 +977,17 @@ type Config struct {
 
 - 실제 가상연애 톤의 응답 생성
 
-### 5단계. 메모리 요약/안정화
+### 5단계. 메모리/후처리 안정화
 
 목표:
 
-- memory_profile / memory_events 조회/저장
-- summary worker 구현
-- session lock / pending queue 적용
+- profile / traits / memory events / topic slots 조회/저장
+- structured extraction / memory slot async runner 안정화
+- session lock / queue / timeout 규칙 적용
 
 완료 기준:
 
-- 최근 대화 + 요약 기억 구조로 안정 동작
+- 최근 대화 + 구조화 메모리 조합으로 안정 동작
 
 ---
 

@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 )
@@ -44,6 +45,9 @@ func (p *Poller) Run(ctx context.Context) error {
 
 		updates, err := p.client.GetUpdates(ctx, offset, p.cfg.TimeoutSec, p.cfg.Limit, p.cfg.AllowedUpdates)
 		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return err
+			}
 			p.logger.Error("telegram polling failed", "error", err)
 			if err := sleepWithContext(ctx, 3*time.Second); err != nil {
 				return err

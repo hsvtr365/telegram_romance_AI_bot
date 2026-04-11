@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hsvtr365/telegram_romance_AI_bot/internal/chat"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/holiday"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/ollama"
 )
@@ -68,7 +69,7 @@ func (c *Composer) Compose(ctx context.Context, input ComposeInput) (ComposeResu
 	llm := c.selectLLM(input.Candidate)
 	if llm == nil {
 		fallback := normalizeProactiveText(seed.Text, c.cfg)
-		fallback = postProcessText(fallback)
+		fallback = chat.PostProcess(fallback, 0)
 		fallback = capQuestions(fallback, c.questionLimit(input.Candidate))
 		fallback = capSentences(fallback, c.cfg.MessageSentenceLimit)
 		fallback = limitRunes(fallback, c.cfg.MessageRuneLimit)
@@ -121,7 +122,7 @@ func (c *Composer) Compose(ctx context.Context, input ComposeInput) (ComposeResu
 		reply = normalizeProactiveText(seed.Text, c.cfg)
 	}
 
-	reply = postProcessText(reply)
+	reply = chat.PostProcess(reply, 0)
 	reply = capQuestions(reply, c.questionLimit(input.Candidate))
 	reply = capSentences(reply, c.cfg.MessageSentenceLimit)
 	reply = limitRunes(reply, c.cfg.MessageRuneLimit)
@@ -193,7 +194,7 @@ func capSentences(text string, maxSentences int) string {
 		return text
 	}
 
-	sentences := splitReplyForTelegram(text)
+	sentences := chat.SplitReplyForTelegram(text)
 	if len(sentences) <= maxSentences {
 		return text
 	}

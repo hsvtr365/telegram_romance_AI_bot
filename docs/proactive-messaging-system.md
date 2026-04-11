@@ -5,6 +5,13 @@
 이 문서는 현재 저장소의 MVP 골격 위에 `선톡(Proactive Messaging)` 서브시스템을 추가하는 설계서다.  
 목표는 “스케줄 발송”이 아니라, 대화 맥락과 이벤트, 감정 흐름, 사용 습관을 보고 먼저 말을 거는 구조를 만드는 것이다.
 
+### 현행화 메모
+
+- 현재 동작 기준은 [chatbot-harness-baseline.md](/Users/suji/Documents/P2/docs/chatbot-harness-baseline.md), [chatbot-harness-design.md](/Users/suji/Documents/P2/docs/chatbot-harness-design.md)와 실제 소스가 우선이다.
+- 선톡 prompt 조립은 `internal/proactive/prompt_builder.go`의 선톡용 `PromptBuilder`가 담당한다.
+- 선톡 compose 전 메모리 요약은 `internal/app/proactive_repository.go`의 `GetMemorySummary`가 topic slots / conversation state를 포함해 만든다.
+- 일반 대화 로그 저장은 `SaveTurn`과 `SaveTurnRecord` 경로를 함께 사용한다.
+
 이 설계는 아래 원칙을 따른다.
 
 - 선톡은 일반 답장 파이프라인과 분리된 독립 서브시스템으로 둔다.
@@ -17,18 +24,18 @@
 - Telegram 발송은 [`internal/telegram/client.go`](/Users/suji/Documents/P2/internal/telegram/client.go) 의 `SendMessage`, `SendChatAction`를 그대로 쓴다.
 - Ollama 호출은 [`internal/ollama/client.go`](/Users/suji/Documents/P2/internal/ollama/client.go) 의 `Chat`을 그대로 쓴다.
 - 최근 대화 로드는 [`internal/store/store.go`](/Users/suji/Documents/P2/internal/store/store.go) 의 `loadRecentConversation` 경로를 재사용한다.
-- 일반 대화 로그 저장 규약은 [`internal/store/store.go`](/Users/suji/Documents/P2/internal/store/store.go) 의 `SaveTurn`을 그대로 따른다.
+- 일반 대화 로그 저장 규약은 [`internal/store/store.go`](/Users/suji/Documents/P2/internal/store/store.go) 의 `SaveTurn`, `SaveTurnRecord` 경로를 따른다.
 - 출력 후처리는 [`internal/chat/postprocess.go`](/Users/suji/Documents/P2/internal/chat/postprocess.go) 의 `PostProcess`, `SplitReplyForTelegram`를 재사용한다.
 
 반대로 그대로 재사용하지 않는 쪽도 명확하다.
 
-- [`internal/chat/prompt_builder.go`](/Users/suji/Documents/P2/internal/chat/prompt_builder.go)는 “사용자 입력에 대한 답장” 중심이므로, 선톡용 `ProactivePromptBuilder`는 분리한다.
+- [`internal/chat/prompt_builder.go`](/Users/suji/Documents/P2/internal/chat/prompt_builder.go)는 “사용자 입력에 대한 답장” 중심이므로, 선톡용 prompt 조립은 [`internal/proactive/prompt_builder.go`](/Users/suji/Documents/P2/internal/proactive/prompt_builder.go)로 분리한다.
 - 선톡 메타데이터는 기존 `tg_chat_messages`만으로는 부족하므로 `tg_proactive_messages`를 별도 둔다.
 - 현재 스키마는 최소형이므로, 선톡 관련 상태와 프로필은 `tg_chat_sessions` 확장 + 별도 프로필/이벤트 테이블로 분리한다.
 
 사람이 수정하기 쉽게 하기 위한 권장 방식은 아래와 같다.
 
-- 선톡 seed 문장은 `internal/proactive/templates/*.txt` 로 분리하고 `go:embed` 로 묶는다.
+- 선톡 seed 문장은 현재 [`internal/proactive/templates.go`](/Users/suji/Documents/P2/internal/proactive/templates.go)에서 관리한다.
 - 점수 가중치와 기본값은 `internal/proactive/defaults.go` 또는 `config` 구조체에서 숫자로 선언한다.
 - 일반 대화 persona 규칙과 선톡용 규칙은 공통 베이스만 공유하고, 나머지 전략 문장은 별도 파일에서 관리한다.
 
@@ -627,7 +634,7 @@ internal/proactive/templates/
 
 권장 prompt 조립 방향:
 
-- 일반 답장용 `PromptBuilder`와 분리한 `ProactivePromptBuilder`
+- 일반 답장용 `PromptBuilder`와 분리한 선톡용 `PromptBuilder`
 - 공통 persona는 `chat` 패키지에서 공유
 - 선톡 전용 규칙은 `internal/proactive/prompt_builder.go`로 별도 유지
 
@@ -1223,11 +1230,12 @@ internal/proactive/
   prompt_builder.go
   types.go
   defaults.go
-  templates/*.txt
+  templates.go
 
 internal/store/postgres/
   proactive.go
-  memory_events.go
+  store.go
+  memory_slots.go
 
 internal/store/redis/
   proactive.go
@@ -1259,7 +1267,7 @@ internal/store/redis/
 
 #### `internal/proactive/composer.go`
 - seed 선택
-- `ProactivePromptBuilder` 호출
+- 선톡용 `PromptBuilder` 호출
 - Ollama 자연화
 - `PostProcess`, `SplitReplyForTelegram` 재사용
 
@@ -1281,15 +1289,18 @@ internal/store/redis/
 - 기본 score, cooldown, quiet hour, threshold 상수 정의
 - 운영자가 숫자만 바꾸기 쉽게 유지
 
-#### `internal/proactive/templates/*.txt`
-- 사람이 직접 고치는 seed 저장소
-- `go:embed`로 포함
+#### `internal/proactive/templates.go`
+- 선톡 seed 템플릿과 fallback 문구 정의
+- 코드 상수 형태로 유지
 
 #### `internal/store/postgres/proactive.go`
 - `tg_proactive_messages`, `tg_proactive_profiles` 접근
 
-#### `internal/store/postgres/memory_events.go`
-- 이벤트 저장, 조회, `used_for_proactive` 업데이트
+#### `internal/store/postgres/store.go`
+- 세션/메시지/이벤트 기본 스키마와 공통 저장 경로 관리
+
+#### `internal/store/postgres/memory_slots.go`
+- topic slots, conversation state slots 접근
 
 #### `internal/store/redis/proactive.go`
 - 락, 쿨다운, 큐, presence 키 접근

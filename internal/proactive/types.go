@@ -263,6 +263,7 @@ type Repository interface {
 	ListDueMemoryEvents(ctx context.Context, now time.Time, limit int) ([]MemoryEvent, error)
 	ListRecentMessages(ctx context.Context, sessionID int64, limit int) ([]ConversationMessage, error)
 	ListRecentProactiveMessages(ctx context.Context, sessionID int64, limit int) ([]ProactiveMessageRecord, error)
+	GetMemorySummary(ctx context.Context, sessionID int64, recentTurnLimit int) (string, error)
 	GetProactiveProfile(ctx context.Context, userID int64) (ProactiveProfile, error)
 	InsertProactiveMessage(ctx context.Context, record ProactiveMessageRecord) (int64, error)
 	UpdateProactiveMessage(ctx context.Context, record ProactiveMessageRecord) error
