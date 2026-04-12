@@ -1,4 +1,7 @@
 .env
+.env.local-ollama
+.env.remote-20260412-195228
+
 .DS_Store
 /bin/
 /dist/
