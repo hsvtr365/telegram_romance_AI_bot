@@ -1,6 +1,7 @@
 .env
 .env.local-ollama
 .env.remote-20260412-195228
+debug_prompt.log
 
 .DS_Store
 /bin/
