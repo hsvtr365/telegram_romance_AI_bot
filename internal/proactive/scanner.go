@@ -62,15 +62,48 @@ func (s *Scanner) scanAt(ctx context.Context, now time.Time, includeReminders bo
 		sessionByID[session.SessionID] = session
 	}
 
+	loadedProfiles := make(map[int64]ProactiveProfile)
+	loadedMessages := make(map[int64][]ConversationMessage)
+	loadedProactives := make(map[int64][]ProactiveMessageRecord)
+
+	loadContext := func(sessionID int64, userID int64) (ProactiveProfile, []ConversationMessage, []ProactiveMessageRecord) {
+		profile, ok := loadedProfiles[userID]
+		if !ok {
+			profile = profileForSession(ctx, s.repo, userID)
+			loadedProfiles[userID] = profile
+		}
+
+		msgs, ok := loadedMessages[sessionID]
+		if !ok {
+			msgs = recentMessagesForSession(ctx, s.repo, sessionID)
+			loadedMessages[sessionID] = msgs
+		}
+
+		pro, ok := loadedProactives[sessionID]
+		if !ok {
+			pro = recentProactivesForSession(ctx, s.repo, sessionID)
+			loadedProactives[sessionID] = pro
+		}
+
+		return profile, msgs, pro
+	}
+
+	getProfile := func(userID int64) ProactiveProfile {
+		profile, ok := loadedProfiles[userID]
+		if !ok {
+			profile = profileForSession(ctx, s.repo, userID)
+			loadedProfiles[userID] = profile
+		}
+		return profile
+	}
+
 	for _, event := range events {
 		session := sessionByID[event.SessionID]
 		if session.SessionID == 0 {
 			continue
 		}
-		profile := profileForSession(ctx, s.repo, session.UserID)
-		recentMessages := recentMessagesForSession(ctx, s.repo, session.SessionID)
-		recentProactives := recentProactivesForSession(ctx, s.repo, session.SessionID)
 		if candidate, ok := s.eventCandidate(session, event, now, includeReminders, includeStandard); ok {
+			profile, recentMessages, recentProactives := loadContext(session.SessionID, session.UserID)
 			candidates = append(candidates, ScannedCandidate{
 				Candidate:        candidate,
 				Session:          session,
@@ -86,10 +119,8 @@ func (s *Scanner) scanAt(ctx context.Context, now time.Time, includeReminders bo
 		if !includeStandard {
 			continue
 		}
-		profile := profileForSession(ctx, s.repo, session.UserID)
-		recentMessages := recentMessagesForSession(ctx, s.repo, session.SessionID)
-		recentProactives := recentProactivesForSession(ctx, s.repo, session.SessionID)
 		if candidate, ok := s.reconnectCandidate(session, now); ok {
+			profile, recentMessages, recentProactives := loadContext(session.SessionID, session.UserID)
 			candidates = append(candidates, ScannedCandidate{
 				Candidate:        candidate,
 				Session:          session,
@@ -99,6 +130,7 @@ func (s *Scanner) scanAt(ctx context.Context, now time.Time, includeReminders bo
 			})
 		}
 		if candidate, ok := s.moodRepairCandidate(session, now); ok {
+			profile, recentMessages, recentProactives := loadContext(session.SessionID, session.UserID)
 			candidates = append(candidates, ScannedCandidate{
 				Candidate:        candidate,
 				Session:          session,
@@ -107,7 +139,10 @@ func (s *Scanner) scanAt(ctx context.Context, now time.Time, includeReminders bo
 				RecentProactives: recentProactives,
 			})
 		}
-		if candidate, ok := s.habitPingCandidate(ctx, session, now); ok {
+		
+		profile := getProfile(session.UserID)
+		if candidate, ok := s.habitPingCandidate(session, profile, now); ok {
+			_, recentMessages, recentProactives := loadContext(session.SessionID, session.UserID)
 			candidates = append(candidates, ScannedCandidate{
 				Candidate:        candidate,
 				Session:          session,
@@ -259,12 +294,8 @@ func (s *Scanner) moodRepairCandidate(session SessionSnapshot, now time.Time) (T
 	}, true
 }
 
-func (s *Scanner) habitPingCandidate(ctx context.Context, session SessionSnapshot, now time.Time) (TriggerCandidate, bool) {
+func (s *Scanner) habitPingCandidate(session SessionSnapshot, profile ProactiveProfile, now time.Time) (TriggerCandidate, bool) {
 	if !s.cfg.EnableHabitPing {
-		return TriggerCandidate{}, false
-	}
-	profile, err := s.repo.GetProactiveProfile(ctx, session.UserID)
-	if err != nil {
 		return TriggerCandidate{}, false
 	}
 	if len(profile.BestTimeWindows) == 0 {

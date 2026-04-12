@@ -16,10 +16,9 @@ type Session struct {
 	ConsecutiveProactiveIgnored int
 	RelationshipScore           float64
 	CurrentMood                 string
-	ConversationPhase           string
-	SexualPauseUntilTurn        int
 	ProactiveOptIn              bool
 	QuietHoursJSON              []byte
+	HistorySummary              string
 	CreatedAt                   time.Time
 	UpdatedAt                   time.Time
 }

@@ -1,8 +1,8 @@
 package chat
 
 import (
+	"encoding/json"
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
 
@@ -21,34 +21,8 @@ const (
 	profileSlotAffiliation  = "affiliation"
 )
 
-const profilePromptTurnCooldown = 5
-
-var (
-	nameExplicitRegex   = regexp.MustCompile(`(?:내\s*이름은|이름은)\s*([가-힣]{2,8})`)
-	nameCasualRegex     = regexp.MustCompile(`(?:난|저는|전)\s*([가-힣]{2,8})\s*(?:이야|이에요|예요)`)
-	genderRegexes       = []*regexp.Regexp{
-		regexp.MustCompile(`(?:내\s*성별은|성별은)\s*(남자|여자|남성|여성)`),
-		regexp.MustCompile(`(?:난|저는|전)\s*(남자|여자|남성|여성)(?:야|이에요|예요|입니다)?`),
-	}
-	ageRegex            = regexp.MustCompile(`(?:나(?:이는)?\s*)?(\d{1,2})\s*살`)
-	birthYearRegex      = regexp.MustCompile(`((?:19|20)?\d{2})\s*년\s*생`)
-	currentFocusRegexes = []*regexp.Regexp{
-		regexp.MustCompile(`요즘\s+(.{2,24}?)\s+하고\s+있(?:어|어요|습니다)`),
-		regexp.MustCompile(`요즘\s+(.{2,24}?)\s+준비\s+중(?:이야|이에요|입니다)?`),
-	}
-	hobbyRegexes = []*regexp.Regexp{
-		regexp.MustCompile(`취미(?:는)?\s+(.{1,24}?)\s*(?:이야|이에요|예요)?(?:\.|!|$)`),
-		regexp.MustCompile(`요즘\s+(.{1,24}?)\s+(?:자주|많이)\s+해`),
-	}
-	locationRegexes = []*regexp.Regexp{
-		regexp.MustCompile(`([가-힣]{2,12})\s*(?:살아|살아요|거주해|쪽이야|쪽이에요)`),
-		regexp.MustCompile(`(?:집은|사는\s*곳은)\s*([가-힣]{2,12})`),
-	}
-	affiliationRegexes = []*regexp.Regexp{
-		regexp.MustCompile(`([가-힣A-Za-z0-9]{2,24})\s*(?:다녀|다니고\s*있어|재학\s*중)`),
-		regexp.MustCompile(`(대학생|대학원생|회사원|직장인|고등학생|중학생)`),
-	}
-)
+const profilePromptTurnCooldown = 8   // Same slot cooldown
+const profilePromptGlobalCooldown = 4 // Any profile slot cooldown
 
 var jobKeywords = []string{
 	"개발자", "디자이너", "간호사", "교사", "강사", "마케터", "회사원", "직장인", "대학생", "대학원생", "학생", "프리랜서", "자영업", "서비스직", "연구원", "기획자", "공무원", "영업", "회계", "변호사", "의사",
@@ -60,40 +34,27 @@ type profilePromptContext struct {
 	Instruction string
 }
 
-func extractProfileSlotHints(input string) pgstore.UpsertUserProfileParams {
-	trimmed := normalizeInput(input)
-	if trimmed == "" {
-		return pgstore.UpsertUserProfileParams{}
-	}
+type pendingSlotData struct {
+	CandidateValue string    `json:"candidate"`
+	Attempts       int       `json:"attempts"`
+	LastAskedAt    time.Time `json:"last_asked_at"`
+}
 
-	params := pgstore.UpsertUserProfileParams{}
+func parsePendingSlots(data []byte) map[string]pendingSlotData {
+	res := make(map[string]pendingSlotData)
+	if len(data) == 0 || string(data) == "{}" {
+		return res
+	}
+	_ = json.Unmarshal(data, &res)
+	return res
+}
 
-	if value := extractName(trimmed); value != "" {
-		params.NameValue = value
+func encodePendingSlots(slots map[string]pendingSlotData) []byte {
+	if len(slots) == 0 {
+		return []byte("{}")
 	}
-	if value := extractGender(trimmed); value != "" {
-		params.GenderValue = value
-	}
-	if value := extractAge(trimmed); value != "" {
-		params.AgeValue = value
-	}
-	if value := extractJob(trimmed); value != "" {
-		params.JobValue = value
-	}
-	if value := extractCurrentFocus(trimmed); value != "" {
-		params.CurrentFocusValue = value
-	}
-	if value := extractHobby(trimmed); value != "" {
-		params.HobbyValue = value
-	}
-	if value := extractLocation(trimmed); value != "" {
-		params.LocationValue = value
-	}
-	if value := extractAffiliation(trimmed); value != "" {
-		params.AffiliationValue = value
-	}
-
-	return params
+	res, _ := json.Marshal(slots)
+	return res
 }
 
 func hasProfileSlotUpdate(params pgstore.UpsertUserProfileParams) bool {
@@ -109,7 +70,7 @@ func hasProfileSlotUpdate(params pgstore.UpsertUserProfileParams) bool {
 
 func buildProfilePromptContext(profile model.UserProfile, recentConversationLen int, userInput string, userTurnCount int, now time.Time) profilePromptContext {
 	firstConversationLike := recentConversationLen == 0
-	richContext := recentConversationLen >= 6
+	richContext := recentConversationLen >= 20
 
 	if profile.CollectionPausedUntilTurn > 0 && userTurnCount < profile.CollectionPausedUntilTurn {
 		return profilePromptContext{}
@@ -140,6 +101,7 @@ func buildProfilePromptContext(profile model.UserProfile, recentConversationLen 
 		instruction.WriteString(fmt.Sprintf("오래된 정보 재확인 후보: %s=%s\n", expiredSlot, expiredValue))
 	}
 	instruction.WriteString(fmt.Sprintf("이번 턴 목표 슬롯: %s\n", targetSlot))
+
 	instruction.WriteString(profileSlotInstruction(targetSlot, profile, expiredSlot, expiredValue))
 
 	return profilePromptContext{
@@ -166,7 +128,7 @@ func missingProfileSlots(profile model.UserProfile) []string {
 
 	missing := make([]string, 0, len(slots))
 	for _, slot := range slots {
-		if strings.TrimSpace(slot.value) == "" {
+		if normalizedProfileValue(slot.value) == "" {
 			missing = append(missing, slot.name)
 		}
 	}
@@ -190,7 +152,8 @@ func firstExpiredMutableSlot(profile model.UserProfile, now time.Time) (string, 
 	}
 
 	for _, candidate := range candidates {
-		if strings.TrimSpace(candidate.value) == "" || candidate.confirmedAt.IsZero() {
+		candidate.value = normalizedProfileValue(candidate.value)
+		if candidate.value == "" || candidate.confirmedAt.IsZero() {
 			continue
 		}
 		if now.Sub(candidate.confirmedAt) > candidate.maxAge {
@@ -237,10 +200,19 @@ func slotEligibleForPrompt(profile model.UserProfile, slot string, userTurnCount
 	if slot == "" {
 		return false
 	}
-	if profile.LastRequestedSlot != slot {
-		return true
+	// Global cooldown: don't ask anything if we asked something recently
+	if profile.LastRequestedUserTurnCount > 0 && userTurnCount-profile.LastRequestedUserTurnCount < profilePromptGlobalCooldown {
+		// Exception: allow asking gender immediately after name
+		if slot == profileSlotGender && profile.LastRequestedSlot == profileSlotName {
+			return true
+		}
+		return false
 	}
-	return userTurnCount-profile.LastRequestedUserTurnCount >= profilePromptTurnCooldown
+	// Per-slot cooldown: don't ask the same thing too soon
+	if profile.LastRequestedSlot == slot && userTurnCount-profile.LastRequestedUserTurnCount < profilePromptTurnCooldown {
+		return false
+	}
+	return true
 }
 
 func detectTopicPreferredSlot(input string) string {
@@ -304,149 +276,68 @@ func profileSlotInstruction(targetSlot string, profile model.UserProfile, expire
 func slotValue(profile model.UserProfile, slot string) string {
 	switch slot {
 	case profileSlotName:
-		return profile.NameValue
+		return normalizedProfileValue(profile.NameValue)
 	case profileSlotGender:
-		return profile.GenderValue
+		return normalizedProfileValue(profile.GenderValue)
 	case profileSlotAge:
-		return profile.AgeValue
+		return normalizedProfileValue(profile.AgeValue)
 	case profileSlotJob:
-		return profile.JobValue
+		return normalizedProfileValue(profile.JobValue)
 	case profileSlotCurrentFocus:
-		return profile.CurrentFocusValue
+		return normalizedProfileValue(profile.CurrentFocusValue)
 	case profileSlotHobby:
-		return profile.HobbyValue
+		return normalizedProfileValue(profile.HobbyValue)
 	case profileSlotLocation:
-		return profile.LocationValue
+		return normalizedProfileValue(profile.LocationValue)
 	case profileSlotAffiliation:
-		return profile.AffiliationValue
+		return normalizedProfileValue(profile.AffiliationValue)
 	default:
 		return ""
 	}
 }
 
-func extractName(input string) string {
-	for _, pattern := range []*regexp.Regexp{nameExplicitRegex, nameCasualRegex} {
-		match := pattern.FindStringSubmatch(input)
-		if len(match) < 2 {
-			continue
-		}
-		name := cleanSlotValue(match[1])
-		name = strings.TrimSuffix(name, "이")
-		name = strings.TrimSuffix(name, "야")
-		if name == "" || len([]rune(name)) < 2 || len([]rune(name)) > 8 {
-			continue
-		}
-		if looksLikeNonName(name) {
-			continue
-		}
-		return name
-	}
-	return ""
-}
-
-func extractGender(input string) string {
-	for _, pattern := range genderRegexes {
-		match := pattern.FindStringSubmatch(input)
-		if len(match) < 2 {
-			continue
-		}
-		switch strings.TrimSpace(match[1]) {
-		case "남자", "남성":
-			return "남성"
-		case "여자", "여성":
-			return "여성"
+func isPositiveAffirmation(input string) bool {
+	normalized := strings.Trim(normalizeInput(input), " .!?")
+	positives := []string{"응", "어", "웅", "맞아", "마자", "예스", "예", "그래", "조아", "좋아", "그럼", "그러면", "그르지", "마조"}
+	for _, p := range positives {
+		if normalized == p {
+			return true
 		}
 	}
-	return ""
-}
-
-func extractAge(input string) string {
-	match := ageRegex.FindStringSubmatch(input)
-	if len(match) >= 2 {
-		return strings.TrimSpace(match[1]) + "살"
-	}
-	match = birthYearRegex.FindStringSubmatch(input)
-	if len(match) < 2 {
-		return ""
-	}
-	year := strings.TrimSpace(match[1])
-	if len(year) == 2 {
-		return year + "년생"
-	}
-	return year + "년생"
-}
-
-func extractJob(input string) string {
-	if hasAnyKeyword(input, "회사 다녀", "회사원", "직장인", "프리랜서", "자영업") {
-		switch {
-		case strings.Contains(input, "회사 다녀"):
-			return "회사원"
-		case strings.Contains(input, "직장인"):
-			return "직장인"
-		case strings.Contains(input, "프리랜서"):
-			return "프리랜서"
-		case strings.Contains(input, "자영업"):
-			return "자영업"
-		}
-	}
-	for _, keyword := range jobKeywords {
-		if strings.Contains(input, keyword) {
-			return keyword
-		}
-	}
-	return ""
-}
-
-func extractCurrentFocus(input string) string {
-	for _, pattern := range currentFocusRegexes {
-		match := pattern.FindStringSubmatch(input)
-		if len(match) >= 2 {
-			return cleanSlotValue(match[1])
-		}
-	}
-	return ""
-}
-
-func extractHobby(input string) string {
-	for _, pattern := range hobbyRegexes {
-		match := pattern.FindStringSubmatch(input)
-		if len(match) >= 2 {
-			return cleanSlotValue(match[1])
-		}
-	}
-	return ""
-}
-
-func extractLocation(input string) string {
-	for _, pattern := range locationRegexes {
-		match := pattern.FindStringSubmatch(input)
-		if len(match) >= 2 {
-			return cleanSlotValue(match[1])
-		}
-	}
-	return ""
-}
-
-func extractAffiliation(input string) string {
-	for _, pattern := range affiliationRegexes {
-		match := pattern.FindStringSubmatch(input)
-		if len(match) >= 2 {
-			return cleanSlotValue(match[1])
-		}
-	}
-	return ""
+	return false
 }
 
 func cleanSlotValue(value string) string {
 	cleaned := strings.TrimSpace(value)
 	cleaned = strings.Trim(cleaned, ".,!? ")
-	for _, suffix := range []string{"이야", "이에요", "예요", "야", "입니다"} {
+	for _, suffix := range []string{"라고 불러", "라고 해", "이야", "이에요", "예요", "야", "입니다", "은", "는", "이", "가"} {
 		cleaned = strings.TrimSpace(strings.TrimSuffix(cleaned, suffix))
 	}
-	if len([]rune(cleaned)) < 2 {
+	if isUnknownProfileValue(cleaned) {
+		return ""
+	}
+	if len([]rune(cleaned)) < 1 {
 		return ""
 	}
 	return cleaned
+}
+
+func normalizedProfileValue(value string) string {
+	cleaned := strings.TrimSpace(value)
+	if isUnknownProfileValue(cleaned) {
+		return ""
+	}
+	return cleaned
+}
+
+func isUnknownProfileValue(value string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	switch normalized {
+	case "", "미정", "모름", "모르겠음", "모르겠어", "알수없음", "알 수 없음", "없음", "없어", "none", "null", "unknown", "unk", "n/a", "na", "tbd":
+		return true
+	default:
+		return false
+	}
 }
 
 func normalizeInput(input string) string {

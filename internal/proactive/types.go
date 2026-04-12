@@ -82,6 +82,8 @@ type ScannedCandidate struct {
 	RecentMessages   []ConversationMessage    `json:"recent_messages,omitempty"`
 	RecentProactives []ProactiveMessageRecord `json:"recent_proactives,omitempty"`
 	Event            *MemoryEvent             `json:"event,omitempty"`
+	Eligibility      *EligibilityResult       `json:"eligibility,omitempty"`
+	CandidateScore   *ScoreResult             `json:"candidate_score,omitempty"`
 }
 
 type Strategy struct {

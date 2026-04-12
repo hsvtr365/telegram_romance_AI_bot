@@ -7,6 +7,9 @@ func TestDetectConversationPhaseSignal_Sexual(t *testing.T) {
 	if got.NextPhase != phaseSexual {
 		t.Fatalf("expected sexual phase, got %+v", got)
 	}
+	if got.MatchedLanguage != "ko" {
+		t.Fatalf("expected korean match metadata, got %+v", got)
+	}
 }
 
 func TestDetectConversationPhaseSignal_DeescalatesOnDiscomfort(t *testing.T) {
@@ -16,6 +19,46 @@ func TestDetectConversationPhaseSignal_DeescalatesOnDiscomfort(t *testing.T) {
 	}
 	if got.PauseSexualTurns <= 0 {
 		t.Fatalf("expected sexual pause, got %+v", got)
+	}
+}
+
+func TestDetectConversationPhaseSignal_SupportsEnglishSexualTrigger(t *testing.T) {
+	got := detectConversationPhaseSignal("Let's do some sexting tonight. Turn me on.", phaseNeutral)
+	if got.NextPhase != phaseSexual {
+		t.Fatalf("expected sexual phase, got %+v", got)
+	}
+	if got.MatchedLanguage != "en" {
+		t.Fatalf("expected english match metadata, got %+v", got)
+	}
+}
+
+func TestDetectConversationPhaseSignal_SupportsJapaneseDeescalation(t *testing.T) {
+	got := detectConversationPhaseSignal("急にどうした？文脈おかしいよ", phaseSexual)
+	if got.NextPhase != phaseNeutral {
+		t.Fatalf("expected neutral phase, got %+v", got)
+	}
+	if got.PauseSexualTurns <= 0 {
+		t.Fatalf("expected sexual pause, got %+v", got)
+	}
+	if got.MatchedLanguage != "ja" {
+		t.Fatalf("expected japanese match metadata, got %+v", got)
+	}
+}
+
+func TestDetectConversationPhaseSignal_SupportsEnglishNeutralTopicShift(t *testing.T) {
+	got := detectConversationPhaseSignal("Let's switch and talk about the code and debugging.", phaseSexual)
+	if got.NextPhase != phaseNeutral {
+		t.Fatalf("expected neutral phase, got %+v", got)
+	}
+	if got.MatchedRule != "neutral_topic_shift" {
+		t.Fatalf("expected neutral topic rule, got %+v", got)
+	}
+}
+
+func TestDetectConversationPhaseSignal_DoesNotDowngradeSexualToFlirty(t *testing.T) {
+	got := detectConversationPhaseSignal("seduce me a little", phaseSexual)
+	if got.NextPhase != "" {
+		t.Fatalf("expected no downgrade from sexual, got %+v", got)
 	}
 }
 

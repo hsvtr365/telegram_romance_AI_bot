@@ -17,7 +17,7 @@ type PromptInput struct {
 	RelationshipNote   string
 	EventNote          string
 	HolidayContextText string
-	RecentConversation []ollama.Message
+	RecentConversation []ConversationMessage
 }
 
 type PromptBuilder struct{}
@@ -50,7 +50,7 @@ func (b *PromptBuilder) Build(input PromptInput) []ollama.Message {
 
 	messages := make([]promptutil.MessageLine, 0, len(input.RecentConversation))
 	for _, msg := range input.RecentConversation {
-		messages = append(messages, promptutil.MessageLine{Role: msg.Role, Content: msg.Content})
+		messages = append(messages, promptutil.MessageLine{Role: msg.Role, Content: msg.Content, CreatedAt: msg.CreatedAt})
 	}
 	promptutil.WriteConversation(&userSection, "Recent Conversation", messages)
 
@@ -88,6 +88,9 @@ func (b *PromptBuilder) buildReminder(input PromptInput) []ollama.Message {
 	if len(input.RecentConversation) > 0 {
 		last := input.RecentConversation[len(input.RecentConversation)-1]
 		lines = append(lines, fmt.Sprintf("latest_message: %s", strings.TrimSpace(last.Content)))
+		if !last.CreatedAt.IsZero() {
+			lines = append(lines, fmt.Sprintf("latest_message_at: %s", promptutil.FormatPromptTimestamp(last.CreatedAt)))
+		}
 	}
 	promptutil.WriteLinesSection(&userSection, "Reminder Context", lines)
 

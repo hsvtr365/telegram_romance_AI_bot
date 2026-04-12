@@ -51,11 +51,20 @@ type ChatConfig struct {
 	SessionLockTTLSec        int
 	CooldownSec              int
 	ResponseMaxChars         int
+	PhaseRulesPath           string
+	StateReviewEnabled       bool
+	StateReviewModel         string
+	StateReviewBaseURL       string
+	StateReviewTimeoutMs     int
+	StateReviewWorkers       int
+	StateReviewQueueSize     int
 	StructuredExtract        bool
 	StructuredMinChars       int
 	StructuredModel          string
+	StructuredBaseURL        string
 	MemorySlotEnabled        bool
 	MemorySlotModel          string
+	MemorySlotBaseURL        string
 	MemorySlotMinChars       int
 	MemorySlotSyncTimeoutMs  int
 	MemorySlotAsyncTimeoutMs int
@@ -77,6 +86,7 @@ type ProactiveConfig struct {
 	EventFollowupGraceHours int
 	MaxCandidatesPerScan    int
 	ReminderModel           string
+	ReminderBaseURL         string
 }
 
 type HolidayConfig struct {
@@ -125,14 +135,23 @@ func Load(dotenvPath string) (Config, error) {
 			SessionLockTTLSec:        envInt("SESSION_LOCK_TTL_SEC", 20),
 			CooldownSec:              envInt("CHAT_COOLDOWN_SEC", 2),
 			ResponseMaxChars:         envInt("RESPONSE_MAX_CHARS", 0),
+			PhaseRulesPath:           envString("CHAT_PHASE_RULES_PATH", "configs/conversation_phase_rules.json"),
+			StateReviewEnabled:       envBool("CHAT_STATE_REVIEW_ENABLED", true),
+			StateReviewModel:         envString("CHAT_STATE_REVIEW_MODEL", ""),
+			StateReviewBaseURL:       envString("CHAT_STATE_REVIEW_BASE_URL", ""),
+			StateReviewTimeoutMs:     envInt("CHAT_STATE_REVIEW_TIMEOUT_MS", 1200),
+			StateReviewWorkers:       envInt("CHAT_STATE_REVIEW_WORKERS", 2),
+			StateReviewQueueSize:     envInt("CHAT_STATE_REVIEW_QUEUE_SIZE", 32),
 			StructuredExtract:        envBool("CHAT_STRUCTURED_EXTRACT_ENABLED", true),
-			StructuredMinChars:       envInt("CHAT_STRUCTURED_EXTRACT_MIN_CHARS", 12),
+			StructuredMinChars:       envInt("CHAT_STRUCTURED_EXTRACT_MIN_CHARS", 1),
 			StructuredModel:          envString("CHAT_STRUCTURED_EXTRACT_MODEL", ""),
-			MemorySlotEnabled:        envBool("CHAT_MEMORY_SLOT_ENABLED", false),
+			StructuredBaseURL:        envString("CHAT_STRUCTURED_EXTRACT_BASE_URL", "http://127.0.0.1:11434"),
+			MemorySlotEnabled:        envBool("CHAT_MEMORY_SLOT_ENABLED", true),
 			MemorySlotModel:          envString("CHAT_MEMORY_SLOT_MODEL", ""),
-			MemorySlotMinChars:       envInt("CHAT_MEMORY_SLOT_MIN_CHARS", 16),
-			MemorySlotSyncTimeoutMs:  envInt("CHAT_MEMORY_SLOT_SYNC_TIMEOUT_MS", 700),
-			MemorySlotAsyncTimeoutMs: envInt("CHAT_MEMORY_SLOT_ASYNC_TIMEOUT_MS", 6000),
+			MemorySlotBaseURL:        envString("CHAT_MEMORY_SLOT_BASE_URL", "http://127.0.0.1:11434"),
+			MemorySlotMinChars:       envInt("CHAT_MEMORY_SLOT_MIN_CHARS", 5),
+			MemorySlotSyncTimeoutMs:  envInt("CHAT_MEMORY_SLOT_SYNC_TIMEOUT_MS", 0),
+			MemorySlotAsyncTimeoutMs: envInt("CHAT_MEMORY_SLOT_ASYNC_TIMEOUT_MS", 120000),
 			MemorySlotWorkers:        envInt("CHAT_MEMORY_SLOT_WORKERS", 2),
 			MemorySlotQueueSize:      envInt("CHAT_MEMORY_SLOT_QUEUE_SIZE", 32),
 		},
@@ -150,6 +169,7 @@ func Load(dotenvPath string) (Config, error) {
 			EventFollowupGraceHours: envInt("PROACTIVE_EVENT_FOLLOWUP_GRACE_HOURS", 3),
 			MaxCandidatesPerScan:    envInt("PROACTIVE_MAX_CANDIDATES_PER_SCAN", 100),
 			ReminderModel:           envString("PROACTIVE_REMINDER_MODEL", ""),
+			ReminderBaseURL:         envString("PROACTIVE_REMINDER_BASE_URL", "http://127.0.0.1:11434"),
 		},
 		Holiday: HolidayConfig{
 			SyncEnabled:       envBool("HOLIDAY_SYNC_ENABLED", true),

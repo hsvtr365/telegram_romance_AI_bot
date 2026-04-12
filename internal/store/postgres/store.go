@@ -97,7 +97,8 @@ ALTER TABLE tg_chat_sessions
     ADD COLUMN IF NOT EXISTS conversation_phase VARCHAR(16) NOT NULL DEFAULT 'neutral',
     ADD COLUMN IF NOT EXISTS sexual_pause_until_turn INT NOT NULL DEFAULT 0,
     ADD COLUMN IF NOT EXISTS proactive_opt_in BOOLEAN NOT NULL DEFAULT TRUE,
-    ADD COLUMN IF NOT EXISTS quiet_hours_json JSONB NOT NULL DEFAULT '[]'::jsonb;
+    ADD COLUMN IF NOT EXISTS quiet_hours_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    ADD COLUMN IF NOT EXISTS history_summary TEXT NOT NULL DEFAULT '';
 
 ALTER TABLE tg_chat_sessions
     ALTER COLUMN proactive_opt_in SET DEFAULT TRUE;
@@ -216,6 +217,7 @@ CREATE TABLE IF NOT EXISTS tg_user_profiles (
     last_requested_slot VARCHAR(32),
     last_requested_user_turn_count INT NOT NULL DEFAULT 0,
     collection_paused_until_turn INT NOT NULL DEFAULT 0,
+    pending_slots_jsonb JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -240,8 +242,53 @@ ALTER TABLE tg_user_profiles
     ADD COLUMN IF NOT EXISTS last_requested_slot VARCHAR(32),
     ADD COLUMN IF NOT EXISTS last_requested_user_turn_count INT NOT NULL DEFAULT 0,
     ADD COLUMN IF NOT EXISTS collection_paused_until_turn INT NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS pending_slots_jsonb JSONB NOT NULL DEFAULT '{}'::jsonb,
     ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+CREATE TABLE IF NOT EXISTS tg_profile_candidates (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES tg_users(id) ON DELETE CASCADE,
+    slot_name VARCHAR(32) NOT NULL,
+    candidate_value TEXT NOT NULL,
+    normalized_value TEXT NOT NULL,
+    best_evidence_type VARCHAR(16) NOT NULL DEFAULT 'tentative',
+    best_confidence VARCHAR(16) NOT NULL DEFAULT 'low',
+    evidence_messages_jsonb JSONB NOT NULL DEFAULT '[]'::jsonb,
+    mention_count INT NOT NULL DEFAULT 1,
+    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    status VARCHAR(16) NOT NULL DEFAULT 'active',
+    reviewed_at TIMESTAMPTZ,
+    promoted_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (user_id, slot_name, normalized_value)
+);
+
+ALTER TABLE tg_profile_candidates
+    ADD COLUMN IF NOT EXISTS candidate_value TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS normalized_value TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS best_evidence_type VARCHAR(16) NOT NULL DEFAULT 'tentative',
+    ADD COLUMN IF NOT EXISTS best_confidence VARCHAR(16) NOT NULL DEFAULT 'low',
+    ADD COLUMN IF NOT EXISTS evidence_messages_jsonb JSONB NOT NULL DEFAULT '[]'::jsonb,
+    ADD COLUMN IF NOT EXISTS mention_count INT NOT NULL DEFAULT 1,
+    ADD COLUMN IF NOT EXISTS first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    ADD COLUMN IF NOT EXISTS status VARCHAR(16) NOT NULL DEFAULT 'active',
+    ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS promoted_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+CREATE INDEX IF NOT EXISTS idx_tg_profile_candidates_user_slot_rank
+    ON tg_profile_candidates (
+        user_id,
+        slot_name,
+        status,
+        mention_count DESC,
+        last_seen_at DESC
+    );
 
 CREATE TABLE IF NOT EXISTS tg_user_traits (
     id BIGSERIAL PRIMARY KEY,
@@ -349,6 +396,28 @@ CREATE TABLE IF NOT EXISTS tg_conversation_state_slots (
 
 CREATE INDEX IF NOT EXISTS idx_tg_conversation_state_slots_message
     ON tg_conversation_state_slots (last_source_message_id ASC);
+
+CREATE TABLE IF NOT EXISTS tg_conversation_state_machine (
+    session_id BIGINT PRIMARY KEY REFERENCES tg_chat_sessions(id) ON DELETE CASCADE,
+    revision BIGINT NOT NULL DEFAULT 0,
+    tone_phase VARCHAR(16) NOT NULL DEFAULT 'neutral',
+    relational_stage VARCHAR(32) NOT NULL DEFAULT 'opener',
+    stage_direction VARCHAR(32) NOT NULL DEFAULT 'stable',
+    emotional_tone TEXT NOT NULL DEFAULT '',
+    interaction_mode TEXT NOT NULL DEFAULT '',
+    focus_topic_key VARCHAR(128) NOT NULL DEFAULT '',
+    open_loop_summary TEXT NOT NULL DEFAULT '',
+    safety_lock_until_turn INT NOT NULL DEFAULT 0,
+    confidence VARCHAR(16) NOT NULL DEFAULT 'low',
+    last_source_message_id BIGINT REFERENCES tg_chat_messages(id) ON DELETE SET NULL,
+    last_decision_source VARCHAR(32) NOT NULL DEFAULT 'rule',
+    evidence_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_tg_conversation_state_machine_message
+    ON tg_conversation_state_machine (last_source_message_id ASC);
 `
 
 	_, err := s.pool.Exec(ctx, schema)
@@ -429,10 +498,9 @@ RETURNING
     consecutive_proactive_ignored,
     COALESCE(relationship_score, 40.00),
     current_mood,
-    conversation_phase,
-    COALESCE(sexual_pause_until_turn, 0),
     proactive_opt_in,
     COALESCE(quiet_hours_json, '[]'::jsonb),
+    COALESCE(history_summary, ''),
     created_at,
     updated_at
 `
@@ -452,10 +520,9 @@ RETURNING
 		&session.ConsecutiveProactiveIgnored,
 		&session.RelationshipScore,
 		&session.CurrentMood,
-		&session.ConversationPhase,
-		&session.SexualPauseUntilTurn,
 		&session.ProactiveOptIn,
 		&session.QuietHoursJSON,
+		&session.HistorySummary,
 		&session.CreatedAt,
 		&session.UpdatedAt,
 	)
@@ -644,6 +711,58 @@ WHERE id = $1
 
 	_, err := s.pool.Exec(ctx, query, sessionID, score)
 	return err
+}
+
+func (s *Store) UpdateSessionHistorySummary(ctx context.Context, sessionID int64, summary string) error {
+	const query = `
+UPDATE tg_chat_sessions
+SET
+    history_summary = $2,
+    updated_at = NOW()
+WHERE id = $1
+`
+
+	_, err := s.pool.Exec(ctx, query, sessionID, summary)
+	return err
+}
+
+func (s *Store) ListOldMessages(ctx context.Context, sessionID int64, excludedRecentLimit int, totalLimit int) ([]model.Message, error) {
+	const query = `
+SELECT id, session_id, role, content, mode, created_at
+FROM tg_chat_messages
+WHERE session_id = $1
+AND id < COALESCE((
+    SELECT id FROM tg_chat_messages 
+    WHERE session_id = $1 
+    ORDER BY id DESC 
+    LIMIT 1 OFFSET $2
+), 9223372036854775807)
+ORDER BY id ASC
+LIMIT $3
+`
+
+	rows, err := s.pool.Query(ctx, query, sessionID, excludedRecentLimit, totalLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	messages := make([]model.Message, 0, totalLimit)
+	for rows.Next() {
+		var message model.Message
+		if err := rows.Scan(
+			&message.ID,
+			&message.SessionID,
+			&message.Role,
+			&message.Content,
+			&message.Mode,
+			&message.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		messages = append(messages, message)
+	}
+	return messages, nil
 }
 
 func (s *Store) ListRecentMessages(ctx context.Context, sessionID int64, limit int) ([]model.Message, error) {

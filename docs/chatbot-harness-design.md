@@ -9,8 +9,8 @@
 ### `HarnessInput`
 - message meta: `update_id`, `telegram_chat_id`, `telegram_user_id`, `message_text`
 - session snapshot: mode, recent turn limit, conversation phase
-- conversation context: recent conversation, profile, traits
-- memory context: topic slots, conversation state, memory summary
+- conversation context: timestamped recent conversation, profile, traits
+- memory context: topic slots with temporal metadata, conversation state, stale-aware history summary, memory summary
 - extra context: holiday, event, proactive candidate
 
 ### `HarnessStage`
@@ -21,7 +21,8 @@
 - `background_analyze`
   - structured extraction, memory slot async analyze
 - `prompt_build`
-  - section formatter로 prompt 조립
+  - section formatter와 공용 시간 formatter로 prompt 조립
+  - recent conversation에 절대 시각을 넣고, history summary에는 stale guardrail을 붙인다
 - `generate`
   - main/reminder model 호출 또는 fallback 선택
 - `postprocess`
@@ -51,16 +52,22 @@
 - supersede
 - fallback text/seed
 - memory summary 재사용
+- timestamped recent conversation
+- stale history guardrail
 
 ## 4. 테스트 하네스 시나리오
 - 채팅
   - 첫 대화/리셋 직후 false familiarity 차단
+  - 최근 대화에 어제/오늘 경계가 드러나도록 timestamp 유지
+  - history summary의 일회성 과거 화제가 현재 사실처럼 재주입되지 않음
   - profile extraction 성공/실패
   - memory slot sync parse/merge/prompt gate
+  - memory summary에 `last_seen_at` / `updated_at`가 포함됨
   - `PostProcess` / `SplitReplyForTelegram` 회귀
 - 선톡
   - reminder / reconnect / event_followup / mood_repair
   - memory summary prompt 주입
+  - recent conversation timestamp 재사용
   - dedupe, opt-in, quiet hours, threshold
 - 실행기
   - queue full drop

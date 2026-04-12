@@ -15,5 +15,5 @@ func New(env string) *slog.Logger {
 		return slog.New(slog.NewJSONHandler(os.Stdout, options))
 	}
 
-	return slog.New(slog.NewTextHandler(os.Stdout, options))
+	return slog.New(NewPrettyHandler(os.Stdout, options))
 }

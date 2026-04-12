@@ -138,12 +138,16 @@ func TestBuildMemoryPromptSections_FiltersLowConfidenceSingleMention(t *testing.
 		InteractionMode: "supportive",
 		OpenLoopSummary: "시험 끝난 뒤 다시 확인할 것",
 		Confidence:      model.ConfidenceMedium,
+		UpdatedAt:       time.Now(),
 	}
 
 	sections := BuildMemoryPromptSections(slots, state)
 
 	if !strings.Contains(sections.ActiveTopicsText, "시험 준비") {
 		t.Fatalf("expected medium-confidence active topic in prompt: %q", sections.ActiveTopicsText)
+	}
+	if !strings.Contains(sections.ActiveTopicsText, "last_seen_at=") {
+		t.Fatalf("expected topic timing metadata in prompt: %q", sections.ActiveTopicsText)
 	}
 	if strings.Contains(sections.ActiveTopicsText, "애매한 새 화제") {
 		t.Fatalf("did not expect low-confidence single-mention topic: %q", sections.ActiveTopicsText)
@@ -154,10 +158,101 @@ func TestBuildMemoryPromptSections_FiltersLowConfidenceSingleMention(t *testing.
 	if !strings.Contains(sections.ConversationStateText, "stage=support") {
 		t.Fatalf("expected conversation state section: %q", sections.ConversationStateText)
 	}
+	if !strings.Contains(sections.ConversationStateText, "updated_at=") {
+		t.Fatalf("expected state timing metadata: %q", sections.ConversationStateText)
+	}
 	if !strings.Contains(sections.OpenLoopsText, "시험 끝난 뒤") {
 		t.Fatalf("expected open loop summary: %q", sections.OpenLoopsText)
 	}
 	if !strings.Contains(sections.MemorySummary, "[Active Topic Slots]") {
 		t.Fatalf("expected combined memory summary: %q", sections.MemorySummary)
+	}
+}
+
+func TestBuildMemoryPromptSectionsFromStateMachine_SeparatesTopicsAndState(t *testing.T) {
+	slots := []model.TopicSlot{
+		{
+			TopicLabel:   "시험 준비",
+			Summary:      "이번 주 시험이 다가옴",
+			Status:       model.TopicSlotStatusActive,
+			Confidence:   model.ConfidenceMedium,
+			Importance:   85,
+			MentionCount: 2,
+			LastSeenAt:   time.Now(),
+		},
+	}
+	state := model.ConversationStateMachine{
+		TonePhase:           phaseFlirty,
+		RelationalStage:     "flirting",
+		StageDirection:      "escalating",
+		EmotionalTone:       "curious",
+		InteractionMode:     "playful",
+		FocusTopicKey:       "시험 준비",
+		OpenLoopSummary:     "다음에 시험 결과를 다시 묻기",
+		SafetyLockUntilTurn: 4,
+		Confidence:          "high",
+		Revision:            12,
+		LastSourceMessageID: 99,
+		LastDecisionSource:  "async_state_review",
+		UpdatedAt:           time.Now(),
+	}
+
+	sections := BuildMemoryPromptSectionsFromStateMachine(slots, state)
+
+	if !strings.Contains(sections.ActiveTopicsText, "시험 준비") {
+		t.Fatalf("expected active topic in prompt, got %q", sections.ActiveTopicsText)
+	}
+	if !strings.Contains(sections.ConversationStateMachineText, "tone_phase=flirty") {
+		t.Fatalf("expected tone phase in state machine text, got %q", sections.ConversationStateMachineText)
+	}
+	if !strings.Contains(sections.ConversationStateMachineText, "relational_stage=flirting") {
+		t.Fatalf("expected relational stage in state machine text, got %q", sections.ConversationStateMachineText)
+	}
+	if !strings.Contains(sections.ConversationStateMachineText, "updated_at=") {
+		t.Fatalf("expected updated_at in state machine text, got %q", sections.ConversationStateMachineText)
+	}
+	if !strings.Contains(sections.ConversationStateMachineText, "safety_lock_until_turn=4") {
+		t.Fatalf("expected safety lock in state machine text, got %q", sections.ConversationStateMachineText)
+	}
+	if !strings.Contains(sections.MemorySummary, "[Conversation State Machine]") {
+		t.Fatalf("expected state machine summary section, got %q", sections.MemorySummary)
+	}
+	if strings.Contains(sections.MemorySummary, "[Conversation State]\n") {
+		t.Fatalf("did not expect legacy conversation state section in new state machine summary, got %q", sections.MemorySummary)
+	}
+}
+
+func TestMemorySlotPromptBuilder_IsTopicOnly(t *testing.T) {
+	builder := NewMemorySlotPromptBuilder()
+	messages := builder.Build(MemorySlotAnalyzeInput{
+		Snapshot: model.MemorySlotSnapshot{
+			SessionID: 1,
+			TopicSlots: []model.TopicSlot{
+				{
+					SlotKey:    topicKeyFromLabel("시험 준비"),
+					TopicLabel: "시험 준비",
+					Summary:    "시험이 다가옴",
+				},
+			},
+			ConversationState: model.ConversationStateSlot{
+				SessionID:      1,
+				CurrentStage:   "support",
+				StageDirection: "warming",
+			},
+		},
+		CurrentUserInput: "시험 얘기해줘",
+	})
+
+	if len(messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(messages))
+	}
+	if strings.Contains(messages[1].Content, "Current Conversation State") {
+		t.Fatalf("expected topic-only prompt, got %q", messages[1].Content)
+	}
+	if !strings.Contains(messages[0].Content, "\"resolved_topics\"") {
+		t.Fatalf("expected topic-only schema, got %q", messages[0].Content)
+	}
+	if strings.Contains(messages[0].Content, "conversation_state") {
+		t.Fatalf("did not expect conversation_state in topic-only schema, got %q", messages[0].Content)
 	}
 }

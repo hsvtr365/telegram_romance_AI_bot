@@ -312,3 +312,161 @@ RETURNING
 	)
 	return updated, err
 }
+
+func (s *Store) GetConversationStateMachine(ctx context.Context, sessionID int64) (model.ConversationStateMachine, error) {
+	const query = `
+SELECT
+    session_id,
+    COALESCE(revision, 0),
+    COALESCE(tone_phase, ''),
+    COALESCE(relational_stage, ''),
+    COALESCE(stage_direction, ''),
+    COALESCE(emotional_tone, ''),
+    COALESCE(interaction_mode, ''),
+    COALESCE(focus_topic_key, ''),
+    COALESCE(open_loop_summary, ''),
+    COALESCE(safety_lock_until_turn, 0),
+    COALESCE(confidence, ''),
+    COALESCE(last_source_message_id, 0),
+    COALESCE(last_decision_source, ''),
+    COALESCE(evidence_json, '[]'::jsonb),
+    created_at,
+    updated_at
+FROM tg_conversation_state_machine
+WHERE session_id = $1
+`
+
+	var state model.ConversationStateMachine
+	err := s.pool.QueryRow(ctx, query, sessionID).Scan(
+		&state.SessionID,
+		&state.Revision,
+		&state.TonePhase,
+		&state.RelationalStage,
+		&state.StageDirection,
+		&state.EmotionalTone,
+		&state.InteractionMode,
+		&state.FocusTopicKey,
+		&state.OpenLoopSummary,
+		&state.SafetyLockUntilTurn,
+		&state.Confidence,
+		&state.LastSourceMessageID,
+		&state.LastDecisionSource,
+		&state.EvidenceJSON,
+		&state.CreatedAt,
+		&state.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return model.ConversationStateMachine{SessionID: sessionID}, nil
+		}
+		return model.ConversationStateMachine{}, err
+	}
+	return state, nil
+}
+
+func (s *Store) UpsertConversationStateMachine(ctx context.Context, state model.ConversationStateMachine) (model.ConversationStateMachine, error) {
+	const query = `
+INSERT INTO tg_conversation_state_machine (
+    session_id,
+    revision,
+    tone_phase,
+    relational_stage,
+    stage_direction,
+    emotional_tone,
+    interaction_mode,
+    focus_topic_key,
+    open_loop_summary,
+    safety_lock_until_turn,
+    confidence,
+    last_source_message_id,
+    last_decision_source,
+    evidence_json
+) VALUES (
+    $1,
+    GREATEST($2, 0),
+    COALESCE(NULLIF($3, ''), 'neutral'),
+    COALESCE(NULLIF($4, ''), 'opener'),
+    COALESCE(NULLIF($5, ''), 'stable'),
+    COALESCE(NULLIF($6, ''), ''),
+    COALESCE(NULLIF($7, ''), ''),
+    COALESCE(NULLIF($8, ''), ''),
+    COALESCE(NULLIF($9, ''), ''),
+    GREATEST($10, 0),
+    COALESCE(NULLIF($11, ''), 'low'),
+    NULLIF($12, 0),
+    COALESCE(NULLIF($13, ''), 'rule'),
+    COALESCE($14::jsonb, '[]'::jsonb)
+)
+ON CONFLICT (session_id) DO UPDATE
+SET
+    revision = EXCLUDED.revision,
+    tone_phase = EXCLUDED.tone_phase,
+    relational_stage = EXCLUDED.relational_stage,
+    stage_direction = EXCLUDED.stage_direction,
+    emotional_tone = EXCLUDED.emotional_tone,
+    interaction_mode = EXCLUDED.interaction_mode,
+    focus_topic_key = EXCLUDED.focus_topic_key,
+    open_loop_summary = EXCLUDED.open_loop_summary,
+    safety_lock_until_turn = EXCLUDED.safety_lock_until_turn,
+    confidence = EXCLUDED.confidence,
+    last_source_message_id = EXCLUDED.last_source_message_id,
+    last_decision_source = EXCLUDED.last_decision_source,
+    evidence_json = EXCLUDED.evidence_json,
+    updated_at = NOW()
+RETURNING
+    session_id,
+    revision,
+    tone_phase,
+    relational_stage,
+    stage_direction,
+    emotional_tone,
+    interaction_mode,
+    focus_topic_key,
+    open_loop_summary,
+    safety_lock_until_turn,
+    confidence,
+    COALESCE(last_source_message_id, 0),
+    last_decision_source,
+    evidence_json,
+    created_at,
+    updated_at
+`
+
+	var updated model.ConversationStateMachine
+	err := s.pool.QueryRow(
+		ctx,
+		query,
+		state.SessionID,
+		state.Revision,
+		state.TonePhase,
+		state.RelationalStage,
+		state.StageDirection,
+		state.EmotionalTone,
+		state.InteractionMode,
+		state.FocusTopicKey,
+		state.OpenLoopSummary,
+		state.SafetyLockUntilTurn,
+		state.Confidence,
+		state.LastSourceMessageID,
+		state.LastDecisionSource,
+		state.EvidenceJSON,
+	).Scan(
+		&updated.SessionID,
+		&updated.Revision,
+		&updated.TonePhase,
+		&updated.RelationalStage,
+		&updated.StageDirection,
+		&updated.EmotionalTone,
+		&updated.InteractionMode,
+		&updated.FocusTopicKey,
+		&updated.OpenLoopSummary,
+		&updated.SafetyLockUntilTurn,
+		&updated.Confidence,
+		&updated.LastSourceMessageID,
+		&updated.LastDecisionSource,
+		&updated.EvidenceJSON,
+		&updated.CreatedAt,
+		&updated.UpdatedAt,
+	)
+	return updated, err
+}

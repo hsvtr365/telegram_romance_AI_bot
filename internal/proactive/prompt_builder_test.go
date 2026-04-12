@@ -3,6 +3,7 @@ package proactive
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestPromptBuilder_IncludesHolidayContext(t *testing.T) {
@@ -44,5 +45,21 @@ func TestPromptBuilder_IncludesMemorySummary(t *testing.T) {
 	}
 	if !strings.Contains(messages[1].Content, "시험 준비") {
 		t.Fatalf("expected memory summary text in prompt, got %q", messages[1].Content)
+	}
+}
+
+func TestPromptBuilder_TimestampsRecentConversation(t *testing.T) {
+	builder := NewPromptBuilder()
+	messages := builder.Build(PromptInput{
+		Candidate: TriggerCandidate{TriggerType: TriggerReconnect, TriggerRefID: "reconnect:1"},
+		Strategy:  Strategy{Purpose: PurposeCheckin, Tone: ToneSoft, Intensity: IntensityLight, Length: LengthShort},
+		Seed:      Seed{Text: "뭐 해"},
+		RecentConversation: []ConversationMessage{
+			{Role: "user", Content: "오늘 좀 피곤해", CreatedAt: time.Date(2026, 4, 12, 10, 0, 0, 0, time.UTC)},
+		},
+	})
+
+	if !strings.Contains(messages[1].Content, "2026-04-12 19:00 KST user: 오늘 좀 피곤해") {
+		t.Fatalf("expected timestamped recent conversation, got %q", messages[1].Content)
 	}
 }

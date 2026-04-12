@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/holiday"
-	"github.com/hsvtr365/telegram_romance_AI_bot/internal/ollama"
+	"github.com/hsvtr365/telegram_romance_AI_bot/pkg/logx"
 )
 
 type Scheduler struct {
@@ -65,7 +65,7 @@ func (s *Scheduler) Run(ctx context.Context) error {
 	defer reminderTicker.Stop()
 
 	if err := s.RunOnce(ctx); err != nil && s.logger != nil {
-		s.logger.Warn("proactive initial run failed", "error", err)
+		s.logger.Warn("선톡 초기 점검에 실패했습니다.", "원인", logx.KoreanError(err))
 	}
 
 	for {
@@ -74,11 +74,11 @@ func (s *Scheduler) Run(ctx context.Context) error {
 			return ctx.Err()
 		case <-reminderTicker.C:
 			if err := s.RunReminderPass(ctx); err != nil && s.logger != nil {
-				s.logger.Warn("proactive reminder run failed", "error", err)
+				s.logger.Warn("선톡 리마인더 스캔에 실패했습니다.", "원인", logx.KoreanError(err))
 			}
 		case <-standardTicker.C:
 			if err := s.RunStandardPass(ctx); err != nil && s.logger != nil {
-				s.logger.Warn("proactive standard run failed", "error", err)
+				s.logger.Warn("선톡 일반 스캔에 실패했습니다.", "원인", logx.KoreanError(err))
 			}
 		}
 	}
@@ -136,12 +136,22 @@ func (s *Scheduler) RunStandardPass(ctx context.Context) error {
 }
 
 func (s *Scheduler) handleScannedCandidate(ctx context.Context, item ScannedCandidate) error {
-	eligibility := EvaluateEligibility(item.Session, item.Candidate, s.clock.Now(), item.Profile, item.RecentProactives)
+	var eligibility EligibilityResult
+	if item.Eligibility != nil {
+		eligibility = *item.Eligibility
+	} else {
+		eligibility = EvaluateEligibility(item.Session, item.Candidate, s.clock.Now(), item.Profile, item.RecentProactives)
+	}
 	if !eligibility.Eligible {
 		return nil
 	}
 
-	score := ScoreCandidate(item.Session, item.Profile, item.Candidate, item.RecentMessages, item.RecentProactives, s.clock.Now())
+	var score ScoreResult
+	if item.CandidateScore != nil {
+		score = *item.CandidateScore
+	} else {
+		score = ScoreCandidate(item.Session, item.Profile, item.Candidate, item.RecentMessages, item.RecentProactives, s.clock.Now())
+	}
 	strategy := ChooseStrategy(item.Candidate, score, item.Session, item.Profile)
 	decision := Decision{
 		Candidate: item.Candidate,
@@ -193,15 +203,14 @@ func (s *Scheduler) handleScannedCandidate(ctx context.Context, item ScannedCand
 
 		var err error
 		composeResult, err = s.composer.Compose(ctx, ComposeInput{
-			Session:            item.Session,
-			Profile:            item.Profile,
-			Candidate:          item.Candidate,
-			Strategy:           strategy,
-			RecentConversation: toOllamaMessages(item.RecentMessages),
-			RecentMessages:     item.RecentMessages,
-			RecentProactives:   item.RecentProactives,
-			MemorySummary:      memorySummary,
-			EventNote:          eventNote(item.Event),
+			Session:          item.Session,
+			Profile:          item.Profile,
+			Candidate:        item.Candidate,
+			Strategy:         strategy,
+			RecentMessages:   item.RecentMessages,
+			RecentProactives: item.RecentProactives,
+			MemorySummary:    memorySummary,
+			EventNote:        eventNote(item.Event),
 		})
 		if err != nil {
 			return err
@@ -258,6 +267,8 @@ func (s *Scheduler) pickBestCandidate(items []ScannedCandidate, now time.Time) (
 		}
 
 		if !found || candidateOutranks(item, score.Score, best, bestScore) {
+			item.Eligibility = &eligibility
+			item.CandidateScore = &score
 			best = item
 			bestScore = score.Score
 			found = true
@@ -340,14 +351,6 @@ func (s *Scheduler) runFeedbackSweep(ctx context.Context) error {
 	}
 
 	return nil
-}
-
-func toOllamaMessages(messages []ConversationMessage) []ollama.Message {
-	out := make([]ollama.Message, 0, len(messages))
-	for _, msg := range messages {
-		out = append(out, ollama.Message{Role: msg.Role, Content: msg.Content})
-	}
-	return out
 }
 
 func eventNote(event *MemoryEvent) string {

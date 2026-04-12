@@ -33,3 +33,35 @@
   - `internal/promptutil/sections.go`
 - 효과
   - chat/proactive/memory 분석기의 section 포맷 규칙이 한곳에 모임
+
+### P1. 일반 대화 1턴당 연속 I/O 과다
+- 결과
+  - `internal/store/store.go`, `internal/chat/service.go`
+  - `BootstrapContext`에서 각 조회(recent, profile, traits, turns)를 `errgroup` 패턴으로 병렬화
+  - `CountUserTurns` 제거하고 묶음 처리한 값을 사용
+- 효과
+  - 응답 Latency 대폭 단축, 동기 대기시간 최소화
+
+### P1. 선톡 스캐너의 세션별 N+1 조회
+- 결과
+  - `internal/proactive/scanner.go`
+  - 프로필 등 개별 조회를 지연 평가(lazy loading) 및 메모리 캐싱 패턴으로 전환
+  - `ScannedCandidate` 생성 성공 시에만 세부 정보를 Load
+- 효과
+  - 스캐너 부하 개선, 불필요한 N+1 조회 제거
+
+### P2. 후보 선정 뒤 적격성/점수 재계산
+- 결과
+  - `internal/proactive/scheduler.go`, `internal/proactive/types.go`
+  - `ScannedCandidate`에 `Eligibility` 및 `CandidateScore` 저장
+  - 첫 계산한 점수/적격성 값을 유지하고 그대로 재사용
+- 효과
+  - 판단 근거 연속성 확보 및 CPU 재계산 방지
+
+### P2. recent cache warm-up 시 Redis append 반복
+- 결과
+  - `internal/store/redis/recent_chat.go`, `internal/store/store.go`
+  - `SetRecent` 메서드(파이프라인) 추가
+  - warm-up 루프 안의 `AppendRecent` 개별 호출 제거
+- 효과
+  - cold start 시 DB to Redis warm-up 부하 감소

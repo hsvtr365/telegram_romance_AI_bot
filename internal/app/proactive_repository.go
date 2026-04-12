@@ -90,7 +90,7 @@ func (r *proactiveRepository) GetMemorySummary(ctx context.Context, sessionID in
 		return "", err
 	}
 
-	return chat.BuildMemorySummary(snapshot.TopicSlots, snapshot.ConversationState), nil
+	return chat.BuildMemorySummaryFromStateMachine(snapshot.TopicSlots, snapshot.ConversationStateMachine), nil
 }
 
 func (r *proactiveRepository) GetProactiveProfile(ctx context.Context, userID int64) (proactive.ProactiveProfile, error) {

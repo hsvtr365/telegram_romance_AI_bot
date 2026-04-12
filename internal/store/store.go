@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hsvtr365/telegram_romance_AI_bot/internal/ollama"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/store/model"
 	pgstore "github.com/hsvtr365/telegram_romance_AI_bot/internal/store/postgres"
 	redistore "github.com/hsvtr365/telegram_romance_AI_bot/internal/store/redis"
@@ -20,13 +19,16 @@ type Config struct {
 }
 
 type ConversationContext struct {
-	User               model.User
-	UserProfile        model.UserProfile
-	UserTraits         []model.UserTrait
-	TopicSlots         []model.TopicSlot
-	ConversationState  model.ConversationStateSlot
-	Session            model.Session
-	RecentConversation []ollama.Message
+	User                     model.User
+	UserProfile              model.UserProfile
+	ProfileCandidates        []model.ProfileCandidate
+	UserTraits               []model.UserTrait
+	TopicSlots               []model.TopicSlot
+	ConversationState        model.ConversationStateSlot
+	ConversationStateMachine model.ConversationStateMachine
+	Session                  model.Session
+	RecentConversation       []model.Message
+	UserTurnCount            int
 }
 
 type Manager struct {
@@ -99,27 +101,68 @@ func (m *Manager) BootstrapContext(ctx context.Context, message telegram.Message
 		return ConversationContext{}, err
 	}
 
-	recentConversation, err := m.loadRecentConversation(ctx, session.ID, recentTurnLimit)
-	if err != nil {
-		return ConversationContext{}, err
-	}
+	errChan := make(chan error, 6)
+	var recentConversation []model.Message
+	var userProfile model.UserProfile
+	var profileCandidates []model.ProfileCandidate
+	var userTraits []model.UserTrait
+	var conversationStateMachine model.ConversationStateMachine
+	var userTurnCount int
 
-	userProfile, err := m.postgres.GetUserProfileByUserID(ctx, user.ID)
-	if err != nil {
-		return ConversationContext{}, err
-	}
+	go func() {
+		var err error
+		recentConversation, err = m.loadRecentConversation(ctx, session.ID, recentTurnLimit)
+		errChan <- err
+	}()
 
-	userTraits, err := m.postgres.ListUserTraitsByUserID(ctx, user.ID, 32)
+	go func() {
+		var err error
+		userProfile, err = m.postgres.GetUserProfileByUserID(ctx, user.ID)
+		errChan <- err
+	}()
+
+	go func() {
+		var err error
+		profileCandidates, err = m.postgres.ListTopProfileCandidatesByUserID(ctx, user.ID)
+		errChan <- err
+	}()
+
+	go func() {
+		var err error
+		userTraits, err = m.postgres.ListUserTraitsByUserID(ctx, user.ID, 32)
+		errChan <- err
+	}()
+
+	go func() {
+		var err error
+		userTurnCount, err = m.postgres.CountUserTurns(ctx, session.ID)
+		errChan <- err
+	}()
+
+	go func() {
+		var err error
+		conversationStateMachine, err = m.postgres.GetConversationStateMachine(ctx, session.ID)
+		errChan <- err
+	}()
+
+	for i := 0; i < 6; i++ {
+		if fetchErr := <-errChan; fetchErr != nil && err == nil {
+			err = fetchErr
+		}
+	}
 	if err != nil {
 		return ConversationContext{}, err
 	}
 
 	return ConversationContext{
-		User:               user,
-		UserProfile:        userProfile,
-		UserTraits:         userTraits,
-		Session:            session,
-		RecentConversation: recentConversation,
+		User:                     user,
+		UserProfile:              userProfile,
+		ProfileCandidates:        profileCandidates,
+		UserTraits:               userTraits,
+		ConversationStateMachine: conversationStateMachine,
+		Session:                  session,
+		RecentConversation:       recentConversation,
+		UserTurnCount:            userTurnCount,
 	}, nil
 }
 
@@ -236,12 +279,28 @@ func (m *Manager) SetSessionRelationshipScore(ctx context.Context, sessionID int
 	return m.postgres.SetSessionRelationshipScore(ctx, sessionID, score)
 }
 
+func (m *Manager) UpdateSessionHistorySummary(ctx context.Context, sessionID int64, summary string) error {
+	return m.postgres.UpdateSessionHistorySummary(ctx, sessionID, summary)
+}
+
 func (m *Manager) GetUserProfileByUserID(ctx context.Context, userID int64) (model.UserProfile, error) {
 	return m.postgres.GetUserProfileByUserID(ctx, userID)
 }
 
 func (m *Manager) UpsertUserProfile(ctx context.Context, params pgstore.UpsertUserProfileParams) (model.UserProfile, error) {
 	return m.postgres.UpsertUserProfile(ctx, params)
+}
+
+func (m *Manager) MergeProfileCandidate(ctx context.Context, params pgstore.MergeProfileCandidateParams) (model.ProfileCandidate, error) {
+	return m.postgres.MergeProfileCandidate(ctx, params)
+}
+
+func (m *Manager) ListTopProfileCandidatesByUserID(ctx context.Context, userID int64) ([]model.ProfileCandidate, error) {
+	return m.postgres.ListTopProfileCandidatesByUserID(ctx, userID)
+}
+
+func (m *Manager) UpdateProfileCandidateStatus(ctx context.Context, params pgstore.UpdateProfileCandidateStatusParams) error {
+	return m.postgres.UpdateProfileCandidateStatus(ctx, params)
 }
 
 func (m *Manager) UpsertUserTrait(ctx context.Context, params pgstore.UpsertUserTraitParams) (model.UserTrait, error) {
@@ -262,6 +321,10 @@ func (m *Manager) PauseUserProfileCollection(ctx context.Context, userID int64, 
 
 func (m *Manager) CountUserTurns(ctx context.Context, sessionID int64) (int, error) {
 	return m.postgres.CountUserTurns(ctx, sessionID)
+}
+
+func (m *Manager) ListProfileReviewWindowMessages(ctx context.Context, sessionID int64, userTurnLimit int) ([]model.Message, error) {
+	return m.postgres.ListProfileReviewWindowMessages(ctx, sessionID, userTurnLimit)
 }
 
 func (m *Manager) UpsertProactiveProfile(ctx context.Context, params pgstore.UpsertProactiveProfileParams) (model.ProactiveProfile, error) {
@@ -340,6 +403,10 @@ func (m *Manager) ListConversationMessages(ctx context.Context, sessionID int64,
 	return m.postgres.ListConversationMessages(ctx, sessionID, limit)
 }
 
+func (m *Manager) ListOldMessages(ctx context.Context, sessionID int64, excludedRecentLimit int, totalLimit int) ([]model.Message, error) {
+	return m.postgres.ListOldMessages(ctx, sessionID, excludedRecentLimit, totalLimit)
+}
+
 func (m *Manager) ListActiveTopicSlots(ctx context.Context, sessionID int64, limit int) ([]model.TopicSlot, error) {
 	return m.postgres.ListActiveTopicSlots(ctx, sessionID, limit)
 }
@@ -370,27 +437,51 @@ func (m *Manager) UpsertConversationStateSlot(ctx context.Context, sessionID int
 	return m.postgres.UpsertConversationStateSlot(ctx, slot)
 }
 
-func (m *Manager) BuildMemorySlotSnapshot(ctx context.Context, sessionID int64, recentTurnLimit int) (model.MemorySlotSnapshot, error) {
+func (m *Manager) GetConversationStateMachine(ctx context.Context, sessionID int64) (model.ConversationStateMachine, error) {
+	return m.postgres.GetConversationStateMachine(ctx, sessionID)
+}
+
+func (m *Manager) UpsertConversationStateMachine(ctx context.Context, sessionID int64, state model.ConversationStateMachine) (model.ConversationStateMachine, error) {
+	state.SessionID = sessionID
+	return m.postgres.UpsertConversationStateMachine(ctx, state)
+}
+
+func (m *Manager) BuildStateReviewSnapshot(ctx context.Context, sessionID int64, recentTurnLimit int) (model.StateReviewSnapshot, error) {
 	recentMessages, err := m.postgres.ListConversationMessages(ctx, sessionID, recentTurnLimit)
 	if err != nil {
-		return model.MemorySlotSnapshot{}, err
+		return model.StateReviewSnapshot{}, err
 	}
 
 	topicSlots, err := m.postgres.ListActiveTopicSlots(ctx, sessionID, 10)
 	if err != nil {
-		return model.MemorySlotSnapshot{}, err
+		return model.StateReviewSnapshot{}, err
 	}
 
-	conversationState, err := m.postgres.GetConversationStateSlot(ctx, sessionID)
+	stateMachine, err := m.postgres.GetConversationStateMachine(ctx, sessionID)
+	if err != nil {
+		return model.StateReviewSnapshot{}, err
+	}
+
+	return model.StateReviewSnapshot{
+		SessionID:       sessionID,
+		RecentMessages:  recentMessages,
+		TopicSlots:      topicSlots,
+		StateMachine:    stateMachine,
+		RecentTurnLimit: recentTurnLimit,
+	}, nil
+}
+
+func (m *Manager) BuildMemorySlotSnapshot(ctx context.Context, sessionID int64, recentTurnLimit int) (model.MemorySlotSnapshot, error) {
+	stateReviewSnapshot, err := m.BuildStateReviewSnapshot(ctx, sessionID, recentTurnLimit)
 	if err != nil {
 		return model.MemorySlotSnapshot{}, err
 	}
 
 	return model.MemorySlotSnapshot{
-		SessionID:         sessionID,
-		RecentMessages:    recentMessages,
-		TopicSlots:        topicSlots,
-		ConversationState: conversationState,
+		SessionID:                sessionID,
+		RecentMessages:           stateReviewSnapshot.RecentMessages,
+		TopicSlots:               stateReviewSnapshot.TopicSlots,
+		ConversationStateMachine: stateReviewSnapshot.StateMachine,
 	}, nil
 }
 
@@ -446,7 +537,7 @@ func (m *Manager) DeleteProactiveSessionData(ctx context.Context, sessionIDs []i
 	return m.redis.DeleteProactiveSessionData(ctx, sessionIDs)
 }
 
-func (m *Manager) loadRecentConversation(ctx context.Context, sessionID int64, recentTurnLimit int) ([]ollama.Message, error) {
+func (m *Manager) loadRecentConversation(ctx context.Context, sessionID int64, recentTurnLimit int) ([]model.Message, error) {
 	turns, err := m.redis.GetRecent(ctx, sessionID)
 	if err != nil {
 		return nil, err
@@ -469,25 +560,23 @@ func (m *Manager) loadRecentConversation(ctx context.Context, sessionID int64, r
 				Content: message.Content,
 				SavedAt: message.CreatedAt,
 			})
-			if err := m.redis.AppendRecent(ctx, sessionID, redistore.Turn{
-				Role:    message.Role,
-				Content: message.Content,
-				SavedAt: message.CreatedAt,
-			}, recentTurnLimit); err != nil {
-				m.logger.Warn("failed to warm recent chat cache", "session_id", sessionID, "error", err)
-				break
-			}
+		}
+
+		if err := m.redis.SetRecent(ctx, sessionID, turns, recentTurnLimit); err != nil {
+			m.logger.Warn("failed to warm recent chat cache bulk", "session_id", sessionID, "error", err)
 		}
 	}
 
-	recentConversation := make([]ollama.Message, 0, len(turns))
+	recentConversation := make([]model.Message, 0, len(turns))
 	for _, turn := range turns {
 		if strings.TrimSpace(turn.Content) == "" {
 			continue
 		}
-		recentConversation = append(recentConversation, ollama.Message{
-			Role:    turn.Role,
-			Content: turn.Content,
+		recentConversation = append(recentConversation, model.Message{
+			SessionID: sessionID,
+			Role:      turn.Role,
+			Content:   turn.Content,
+			CreatedAt: turn.SavedAt,
 		})
 	}
 

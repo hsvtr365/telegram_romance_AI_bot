@@ -10,7 +10,7 @@
 2. `internal/chat/service.go`
    - `HandleUpdate`가 private/text 여부와 명령어를 먼저 분기한다.
 3. `internal/store/store.go`
-   - `BootstrapContext`에서 user/session/recent/profile/traits를 읽는다.
+   - `BootstrapContext`에서 user/session/timestamped recent/profile/traits를 읽는다.
 4. `internal/store/store.go`
    - 사용자 메시지를 `SaveTurnRecord`로 저장하고 message id를 확보한다.
 5. `internal/chat/service.go`
@@ -21,7 +21,9 @@
 7. `internal/chat/memory_slot_analyzer.go`
    - 작은 모델 `SyncAnalyze`를 짧은 timeout으로 실행하고, 성공 시 현재 턴 prompt에만 overlay 한다.
 8. `internal/chat/prompt_builder.go`
-   - recent conversation, profile, traits, holiday, topic slots, conversation state를 합쳐 prompt를 만든다.
+   - current time, stale-aware history summary, timestamped recent conversation, profile, traits, holiday, topic slots, conversation state를 합쳐 prompt를 만든다.
+   - recent conversation 각 턴은 절대 시각을 포함하고, history summary에는 "최근 대화 우선" guardrail이 붙는다.
+   - memory summary에는 topic `last_seen_at`, state `updated_at` 같은 시간 정보가 함께 들어간다.
    - section formatting은 `internal/promptutil/sections.go`를 재사용한다.
 9. `internal/ollama/client.go`
    - 메인 LLM 호출을 수행한다.
@@ -55,8 +57,10 @@
    - 적격성, 점수, 발송 전략을 계산한다.
 4. `internal/app/proactive_repository.go`
    - compose 전에 `GetMemorySummary`로 topic/state 기반 memory summary를 만든다.
+   - summary에는 topic/state 시간 정보가 포함된다.
 5. `internal/proactive/composer.go`
    - seed 선택, holiday context 결합, LLM 생성 또는 seed fallback을 수행한다.
+   - proactive prompt도 timestamped recent conversation formatter를 재사용한다.
    - postprocess/split은 `internal/chat/postprocess.go` 구현을 재사용한다.
 6. `internal/proactive/sender.go`
    - Telegram 발송, proactive message 저장, conversation turn 저장, session state 갱신을 수행한다.
@@ -67,13 +71,14 @@
 - 저장소 진입점: `internal/store/store.go`
 - 휴일 컨텍스트: `internal/holiday/context.go`
 - 비동기 분석 실행기: `internal/chat/async_runner.go`
-- prompt section formatter: `internal/promptutil/sections.go`
+- prompt section/time formatter: `internal/promptutil/sections.go`, `internal/promptutil/time.go`
 - 응답 후처리/분할: `internal/chat/postprocess.go`
 
 ## 5. 현재 하네스화된 지점
 - 메모리 슬롯: sync overlay + async persist
 - 구조화 추출: bounded concurrency + supersede
 - prompt section formatting: chat/proactive/memory 분석기 공통 규칙
+- prompt temporal grounding: chat/proactive/memory 분석기 모두 공용 timestamp 포맷 사용
 - proactive memory summary: topic/state를 선톡 compose에도 재사용
 
 ## 6. 아직 남은 핵심 과제

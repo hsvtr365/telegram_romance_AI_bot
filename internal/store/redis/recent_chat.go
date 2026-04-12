@@ -57,6 +57,32 @@ func (s *Store) AppendRecent(ctx context.Context, sessionID int64, turn Turn, li
 	return err
 }
 
+func (s *Store) SetRecent(ctx context.Context, sessionID int64, turns []Turn, limit int) error {
+	if len(turns) == 0 {
+		return nil
+	}
+
+	payloads := make([]interface{}, 0, len(turns))
+	for _, turn := range turns {
+		payload, err := json.Marshal(turn)
+		if err != nil {
+			return err
+		}
+		payloads = append(payloads, payload)
+	}
+
+	key := recentKey(sessionID)
+	pipe := s.client.TxPipeline()
+	pipe.Del(ctx, key)
+	if len(payloads) > 0 {
+		pipe.RPush(ctx, key, payloads...)
+		pipe.LTrim(ctx, key, int64(-limit), -1)
+		pipe.Expire(ctx, key, recentTTL)
+	}
+	_, err := pipe.Exec(ctx)
+	return err
+}
+
 func (s *Store) GetRecent(ctx context.Context, sessionID int64) ([]Turn, error) {
 	key := recentKey(sessionID)
 	values, err := s.client.LRange(ctx, key, 0, -1).Result()

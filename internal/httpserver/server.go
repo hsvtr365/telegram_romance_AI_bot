@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/hsvtr365/telegram_romance_AI_bot/pkg/logx"
 )
 
 type Server struct {
@@ -44,11 +46,11 @@ func (s *Server) Run(ctx context.Context) error {
 		defer cancel()
 
 		if err := s.server.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			s.logger.Error("http server shutdown failed", "error", err)
+			s.logger.Error("HTTP 서버 종료에 실패했습니다.", "원인", logx.KoreanError(err))
 		}
 	}()
 
-	s.logger.Info("http server listening", "addr", s.server.Addr)
+	s.logger.Info("HTTP 서버가 시작되었습니다.", "주소", s.server.Addr)
 
 	err := s.server.ListenAndServe()
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {

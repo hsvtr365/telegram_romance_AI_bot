@@ -23,6 +23,7 @@ type UserProfile struct {
 	LastRequestedSlot          string
 	LastRequestedUserTurnCount int
 	CollectionPausedUntilTurn  int
+	PendingSlotsJSON           []byte
 	CreatedAt                  time.Time
 	UpdatedAt                  time.Time
 }

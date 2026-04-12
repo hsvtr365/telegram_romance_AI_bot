@@ -3,11 +3,13 @@ package promptutil
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 type MessageLine struct {
-	Role    string
-	Content string
+	Role      string
+	Content   string
+	CreatedAt time.Time
 }
 
 func WriteSection(builder *strings.Builder, title string, body string) bool {
@@ -42,14 +44,33 @@ func WriteLinesSection(builder *strings.Builder, title string, lines []string) b
 }
 
 func WriteConversation(builder *strings.Builder, title string, messages []MessageLine) bool {
-	lines := make([]string, 0, len(messages))
+	if len(messages) == 0 {
+		return false
+	}
+
+	merged := make([]MessageLine, 0, len(messages))
 	for _, msg := range messages {
 		role := strings.TrimSpace(msg.Role)
 		content := strings.TrimSpace(msg.Content)
 		if role == "" || content == "" {
 			continue
 		}
-		lines = append(lines, fmt.Sprintf("%s: %s", role, content))
+
+		// Preserve per-turn timing when timestamps are present.
+		if len(merged) > 0 && merged[len(merged)-1].Role == role && merged[len(merged)-1].CreatedAt.IsZero() && msg.CreatedAt.IsZero() {
+			merged[len(merged)-1].Content += "\n" + content
+		} else {
+			merged = append(merged, MessageLine{Role: role, Content: content, CreatedAt: msg.CreatedAt})
+		}
+	}
+
+	lines := make([]string, 0, len(merged))
+	for _, msg := range merged {
+		if msg.CreatedAt.IsZero() {
+			lines = append(lines, fmt.Sprintf("%s: %s", msg.Role, msg.Content))
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("%s %s: %s", FormatPromptTimestamp(msg.CreatedAt), msg.Role, msg.Content))
 	}
 	return WriteLinesSection(builder, title, lines)
 }

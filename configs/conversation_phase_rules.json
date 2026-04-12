@@ -1,0 +1,176 @@
+{
+  "version": 1,
+  "ambiguity": {
+    "min_direct_score": 3,
+    "max_score_gap": 1
+  },
+  "rules": [
+    {
+      "name": "deescalate_discomfort",
+      "next_phase": "neutral",
+      "pause_sexual_turns": 4,
+      "priority": 100,
+      "keywords": {
+        "ko": [
+          { "text": "부담", "match_mode": "contains", "weight": 3 },
+          { "text": "부담돼", "match_mode": "contains", "weight": 3 },
+          { "text": "과해", "match_mode": "contains", "weight": 3 },
+          { "text": "뜬금", "match_mode": "contains", "weight": 2 },
+          { "text": "갑자기 왜", "match_mode": "contains", "weight": 3 },
+          { "text": "왜 갑자기", "match_mode": "contains", "weight": 3 },
+          { "text": "문맥 이상", "match_mode": "contains", "weight": 3 },
+          { "text": "별걸 다", "match_mode": "contains", "weight": 2 },
+          { "text": "멍청아", "match_mode": "contains", "weight": 2 },
+          { "text": "따라하지마", "match_mode": "contains", "weight": 3 },
+          { "text": "그게 왜", "match_mode": "contains", "weight": 2 },
+          { "text": "잘 모르겠", "match_mode": "contains", "weight": 2 },
+          { "text": "솔직해지는건 잘 모르", "match_mode": "contains", "weight": 3 }
+        ],
+        "en": [
+          { "text": "too much", "match_mode": "phrase", "weight": 3 },
+          { "text": "why suddenly", "match_mode": "phrase", "weight": 3 },
+          { "text": "out of nowhere", "match_mode": "phrase", "weight": 3 },
+          { "text": "that's weird", "match_mode": "phrase", "weight": 3 },
+          { "text": "this is weird", "match_mode": "phrase", "weight": 3 },
+          { "text": "stop that", "match_mode": "phrase", "weight": 3 },
+          { "text": "don't do that", "match_mode": "phrase", "weight": 3 }
+        ],
+        "ja": [
+          { "text": "急にどうした", "match_mode": "contains", "weight": 3 },
+          { "text": "いきなりどうした", "match_mode": "contains", "weight": 3 },
+          { "text": "やりすぎ", "match_mode": "contains", "weight": 3 },
+          { "text": "変だよ", "match_mode": "contains", "weight": 3 },
+          { "text": "文脈おかしい", "match_mode": "contains", "weight": 3 },
+          { "text": "やめて", "match_mode": "contains", "weight": 3 }
+        ]
+      }
+    },
+    {
+      "name": "sexual_explicit",
+      "next_phase": "sexual",
+      "priority": 90,
+      "keywords": {
+        "ko": [
+          { "text": "섹스톡", "match_mode": "contains", "weight": 3 },
+          { "text": "꼴리", "match_mode": "contains", "weight": 3 },
+          { "text": "야하게", "match_mode": "contains", "weight": 3 },
+          { "text": "야한", "match_mode": "contains", "weight": 2 },
+          { "text": "흥분", "match_mode": "contains", "weight": 2 },
+          { "text": "발정", "match_mode": "contains", "weight": 3 },
+          { "text": "벗", "match_mode": "contains", "weight": 2 },
+          { "text": "만져", "match_mode": "contains", "weight": 3 },
+          { "text": "박", "match_mode": "contains", "weight": 3 },
+          { "text": "애무", "match_mode": "contains", "weight": 3 },
+          { "text": "자지", "match_mode": "contains", "weight": 3 },
+          { "text": "보지", "match_mode": "contains", "weight": 3 },
+          { "text": "오르가즘", "match_mode": "contains", "weight": 3 },
+          { "text": "신음", "match_mode": "contains", "weight": 2 },
+          { "text": "가슴", "match_mode": "contains", "weight": 1 },
+          { "text": "젖꼭지", "match_mode": "contains", "weight": 3 }
+        ],
+        "en": [
+          { "text": "sexting", "match_mode": "word", "weight": 3 },
+          { "text": "sexy talk", "match_mode": "phrase", "weight": 3 },
+          { "text": "turn me on", "match_mode": "phrase", "weight": 3 },
+          { "text": "horny", "match_mode": "word", "weight": 3 },
+          { "text": "touch me", "match_mode": "phrase", "weight": 3 },
+          { "text": "fuck me", "match_mode": "phrase", "weight": 3 },
+          { "text": "orgasm", "match_mode": "word", "weight": 3 },
+          { "text": "moan", "match_mode": "word", "weight": 2 },
+          { "text": "naked", "match_mode": "word", "weight": 2 },
+          { "text": "pussy", "match_mode": "word", "weight": 3 },
+          { "text": "cock", "match_mode": "word", "weight": 3 }
+        ],
+        "ja": [
+          { "text": "セックストーク", "match_mode": "contains", "weight": 3 },
+          { "text": "エッチ", "match_mode": "contains", "weight": 3 },
+          { "text": "ムラムラ", "match_mode": "contains", "weight": 3 },
+          { "text": "いやらしい", "match_mode": "contains", "weight": 3 },
+          { "text": "触って", "match_mode": "contains", "weight": 3 },
+          { "text": "抱いて", "match_mode": "contains", "weight": 3 },
+          { "text": "イかせて", "match_mode": "contains", "weight": 3 },
+          { "text": "おっぱい", "match_mode": "contains", "weight": 2 },
+          { "text": "乳首", "match_mode": "contains", "weight": 3 }
+        ]
+      }
+    },
+    {
+      "name": "flirty_invitation",
+      "next_phase": "flirty",
+      "priority": 50,
+      "blocked_current_phases": ["sexual"],
+      "keywords": {
+        "ko": [
+          { "text": "도발적", "match_mode": "contains", "weight": 2 },
+          { "text": "유혹", "match_mode": "contains", "weight": 2 },
+          { "text": "끌리", "match_mode": "contains", "weight": 2 },
+          { "text": "설레", "match_mode": "contains", "weight": 1 },
+          { "text": "간질", "match_mode": "contains", "weight": 1 },
+          { "text": "야릇", "match_mode": "contains", "weight": 2 },
+          { "text": "밀당", "match_mode": "contains", "weight": 2 },
+          { "text": "플러팅", "match_mode": "contains", "weight": 2 }
+        ],
+        "en": [
+          { "text": "flirty", "match_mode": "word", "weight": 2 },
+          { "text": "tease me", "match_mode": "phrase", "weight": 2 },
+          { "text": "seduce me", "match_mode": "phrase", "weight": 2 },
+          { "text": "tempt me", "match_mode": "phrase", "weight": 2 },
+          { "text": "chemistry", "match_mode": "word", "weight": 1 },
+          { "text": "butterflies", "match_mode": "word", "weight": 1 }
+        ],
+        "ja": [
+          { "text": "誘惑", "match_mode": "contains", "weight": 2 },
+          { "text": "焦らして", "match_mode": "contains", "weight": 2 },
+          { "text": "口説いて", "match_mode": "contains", "weight": 2 },
+          { "text": "ドキドキ", "match_mode": "contains", "weight": 1 },
+          { "text": "色っぽい", "match_mode": "contains", "weight": 2 }
+        ]
+      }
+    },
+    {
+      "name": "neutral_topic_shift",
+      "next_phase": "neutral",
+      "priority": 40,
+      "keywords": {
+        "ko": [
+          { "text": "개발", "match_mode": "contains", "weight": 2 },
+          { "text": "챗봇", "match_mode": "contains", "weight": 2 },
+          { "text": "프로그램", "match_mode": "contains", "weight": 2 },
+          { "text": "코드", "match_mode": "contains", "weight": 2 },
+          { "text": "토큰", "match_mode": "contains", "weight": 1 },
+          { "text": "프롬프트", "match_mode": "contains", "weight": 2 },
+          { "text": "모델", "match_mode": "contains", "weight": 1 },
+          { "text": "디버깅", "match_mode": "contains", "weight": 2 },
+          { "text": "업무", "match_mode": "contains", "weight": 2 },
+          { "text": "회사", "match_mode": "contains", "weight": 1 },
+          { "text": "프로젝트", "match_mode": "contains", "weight": 2 }
+        ],
+        "en": [
+          { "text": "code", "match_mode": "word", "weight": 2 },
+          { "text": "coding", "match_mode": "word", "weight": 2 },
+          { "text": "chatbot", "match_mode": "word", "weight": 2 },
+          { "text": "program", "match_mode": "word", "weight": 2 },
+          { "text": "programming", "match_mode": "word", "weight": 2 },
+          { "text": "prompt", "match_mode": "word", "weight": 2 },
+          { "text": "model", "match_mode": "word", "weight": 1 },
+          { "text": "debug", "match_mode": "word", "weight": 2 },
+          { "text": "debugging", "match_mode": "word", "weight": 2 },
+          { "text": "project", "match_mode": "word", "weight": 2 },
+          { "text": "work", "match_mode": "word", "weight": 1 }
+        ],
+        "ja": [
+          { "text": "開発", "match_mode": "contains", "weight": 2 },
+          { "text": "チャットボット", "match_mode": "contains", "weight": 2 },
+          { "text": "プログラム", "match_mode": "contains", "weight": 2 },
+          { "text": "コード", "match_mode": "contains", "weight": 2 },
+          { "text": "プロンプト", "match_mode": "contains", "weight": 2 },
+          { "text": "モデル", "match_mode": "contains", "weight": 1 },
+          { "text": "デバッグ", "match_mode": "contains", "weight": 2 },
+          { "text": "仕事", "match_mode": "contains", "weight": 1 },
+          { "text": "会社", "match_mode": "contains", "weight": 1 },
+          { "text": "プロジェクト", "match_mode": "contains", "weight": 2 }
+        ]
+      }
+    }
+  ]
+}

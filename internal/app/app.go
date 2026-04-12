@@ -41,9 +41,9 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	}, logger)
 
 	reminderLLM := buildVariantLLM(
-		ollamaClient,
 		cfg.Ollama,
 		cfg.Proactive.ReminderModel,
+		cfg.Proactive.ReminderBaseURL,
 		func(base ollama.Config) ollama.Config {
 			base.TimeoutSec = maxInt(10, minInt(base.TimeoutSec, 20))
 			base.KeepAlive = "5m"
@@ -55,11 +55,11 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	)
 
 	structuredLLM := buildVariantLLM(
-		ollamaClient,
 		cfg.Ollama,
 		cfg.Chat.StructuredModel,
+		cfg.Chat.StructuredBaseURL,
 		func(base ollama.Config) ollama.Config {
-			base.TimeoutSec = maxInt(8, minInt(base.TimeoutSec, 15))
+			base.TimeoutSec = maxInt(15, minInt(base.TimeoutSec, 240))
 			base.KeepAlive = "3m"
 			base.NumCtx = minInt(base.NumCtx, 768)
 			base.Temperature = 0.1
@@ -70,11 +70,11 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	)
 
 	memorySlotLLM := buildVariantLLM(
-		ollamaClient,
 		cfg.Ollama,
 		cfg.Chat.MemorySlotModel,
+		cfg.Chat.MemorySlotBaseURL,
 		func(base ollama.Config) ollama.Config {
-			base.TimeoutSec = maxInt(8, minInt(base.TimeoutSec, 15))
+			base.TimeoutSec = maxInt(15, minInt(base.TimeoutSec, 240))
 			base.KeepAlive = "3m"
 			base.NumCtx = minInt(base.NumCtx, 1024)
 			base.Temperature = 0.2
@@ -83,6 +83,24 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		},
 		logger,
 	)
+
+	var stateReviewLLM chat.LLM
+	if cfg.Chat.StateReviewEnabled {
+		stateReviewLLM = buildVariantLLM(
+			cfg.Ollama,
+			coalesce(cfg.Chat.StateReviewModel, cfg.Chat.StructuredModel),
+			coalesce(cfg.Chat.StateReviewBaseURL, cfg.Chat.StructuredBaseURL),
+			func(base ollama.Config) ollama.Config {
+				base.TimeoutSec = maxInt(8, minInt(base.TimeoutSec, 20))
+				base.KeepAlive = "2m"
+				base.NumCtx = minInt(base.NumCtx, 768)
+				base.Temperature = 0.1
+				base.TopP = 0.7
+				return base
+			},
+			logger,
+		)
+	}
 
 	conversationStore, err := store.New(ctx, store.Config{
 		PostgresDSN: cfg.Storage.PostgresDSN,
@@ -94,7 +112,13 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 
 	chatService := chat.NewService(chat.Config{
 		RecentTurnLimit:           cfg.Chat.RecentTurnLimit,
+		SummaryTriggerMessages:    cfg.Chat.SummaryTriggerMessages,
 		ResponseMaxChars:          cfg.Chat.ResponseMaxChars,
+		PhaseRulesPath:            cfg.Chat.PhaseRulesPath,
+		StateReviewEnabled:        cfg.Chat.StateReviewEnabled,
+		StateReviewTimeoutMs:      cfg.Chat.StateReviewTimeoutMs,
+		StateReviewWorkers:        cfg.Chat.StateReviewWorkers,
+		StateReviewQueueSize:      cfg.Chat.StateReviewQueueSize,
 		StructuredExtractEnabled:  cfg.Chat.StructuredExtract,
 		StructuredExtractMinChars: cfg.Chat.StructuredMinChars,
 		MemorySlotEnabled:         cfg.Chat.MemorySlotEnabled,
@@ -103,7 +127,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		MemorySlotAsyncTimeoutMs:  cfg.Chat.MemorySlotAsyncTimeoutMs,
 		MemorySlotWorkers:         cfg.Chat.MemorySlotWorkers,
 		MemorySlotQueueSize:       cfg.Chat.MemorySlotQueueSize,
-	}, tgClient, ollamaClient, reminderLLM, structuredLLM, memorySlotLLM, conversationStore, logger)
+	}, tgClient, ollamaClient, reminderLLM, structuredLLM, memorySlotLLM, stateReviewLLM, conversationStore, logger)
 
 	holidayResolver := holiday.NewResolver(conversationStore, holiday.ResolverConfig{
 		LookaheadDays:   cfg.Holiday.LookaheadDays,
@@ -167,6 +191,7 @@ func (a *App) Run(ctx context.Context) error {
 		"reminder_model", coalesce(a.cfg.Proactive.ReminderModel, a.cfg.Ollama.Model),
 		"structured_model", coalesce(a.cfg.Chat.StructuredModel, a.cfg.Ollama.Model),
 		"memory_slot_model", coalesce(a.cfg.Chat.MemorySlotModel, a.cfg.Ollama.Model),
+		"state_review_model", coalesce(coalesce(a.cfg.Chat.StateReviewModel, a.cfg.Chat.StructuredModel), a.cfg.Ollama.Model),
 	)
 
 	errCh := make(chan error, 4)
@@ -225,14 +250,12 @@ func coalesce(value, fallback string) string {
 	return fallback
 }
 
-func buildVariantLLM(baseLLM chat.LLM, baseCfg config.OllamaConfig, model string, tune func(ollama.Config) ollama.Config, logger *slog.Logger) chat.LLM {
+func buildVariantLLM(baseCfg config.OllamaConfig, model, baseURL string, tune func(ollama.Config) ollama.Config, logger *slog.Logger) chat.LLM {
 	model = coalesce(model, baseCfg.Model)
-	if model == baseCfg.Model {
-		return baseLLM
-	}
+	baseURL = coalesce(baseURL, baseCfg.BaseURL)
 
 	cfg := ollama.Config{
-		BaseURL:     baseCfg.BaseURL,
+		BaseURL:     baseURL,
 		Model:       model,
 		TimeoutSec:  baseCfg.TimeoutSec,
 		KeepAlive:   baseCfg.KeepAlive,

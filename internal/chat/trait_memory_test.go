@@ -1,17 +1,23 @@
 package chat
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/store/model"
 )
 
-func TestExtractUserTraits_AvoidAndAllergy(t *testing.T) {
-	traits := extractUserTraits("나는 커피 안 마셔. 새우 알레르기 있어")
-	if len(traits) != 2 {
-		t.Fatalf("expected 2 traits, got %d", len(traits))
+func TestStructuredExtractor_ExtractsAvoidAndAllergy(t *testing.T) {
+	extractor := NewStructuredExtractor(&fakeStructuredLLM{
+		reply: `{"profile":{"name":{"value":"","confidence":"low"},"gender":{"value":"","confidence":"low"},"age":{"value":"","confidence":"low"},"job":{"value":"","confidence":"low"},"current_focus":{"value":"","confidence":"low"},"hobby":{"value":"","confidence":"low"},"location":{"value":"","confidence":"low"},"affiliation":{"value":"","confidence":"low"}},"traits":[{"trait_type":"avoid","value":"커피","confidence":"high"},{"trait_type":"allergy","value":"새우","confidence":"high"}]}`,
+	}, 4)
+
+	payload, err := extractor.Extract(context.Background(), nil, "나는 커피 안 마셔. 새우 알레르기 있어")
+	if err != nil {
+		t.Fatalf("extract structured traits: %v", err)
 	}
+	traits := mergeStructuredTraits(nil, payload.Traits)
 
 	foundAvoid := false
 	foundAllergy := false
@@ -29,8 +35,16 @@ func TestExtractUserTraits_AvoidAndAllergy(t *testing.T) {
 	}
 }
 
-func TestExtractUserTraits_Like(t *testing.T) {
-	traits := extractUserTraits("민트초코 좋아해")
+func TestStructuredExtractor_ExtractsLike(t *testing.T) {
+	extractor := NewStructuredExtractor(&fakeStructuredLLM{
+		reply: `{"profile":{"name":{"value":"","confidence":"low"},"gender":{"value":"","confidence":"low"},"age":{"value":"","confidence":"low"},"job":{"value":"","confidence":"low"},"current_focus":{"value":"","confidence":"low"},"hobby":{"value":"","confidence":"low"},"location":{"value":"","confidence":"low"},"affiliation":{"value":"","confidence":"low"}},"traits":[{"trait_type":"like","value":"민트초코","confidence":"high"}]}`,
+	}, 4)
+
+	payload, err := extractor.Extract(context.Background(), nil, "민트초코 좋아해")
+	if err != nil {
+		t.Fatalf("extract structured traits: %v", err)
+	}
+	traits := mergeStructuredTraits(nil, payload.Traits)
 	if len(traits) != 1 {
 		t.Fatalf("expected 1 trait, got %d", len(traits))
 	}
@@ -47,7 +61,9 @@ func TestPromptBuilder_IncludesKnownUserTraits(t *testing.T) {
 			{TraitType: userTraitAvoid, DisplayValue: "커피"},
 			{TraitType: userTraitAllergy, DisplayValue: "새우"},
 		},
-		ConversationPhase: phaseNeutral,
+		ConversationStateMachine: model.ConversationStateMachine{
+			TonePhase: phaseNeutral,
+		},
 	})
 
 	content := messages[1].Content

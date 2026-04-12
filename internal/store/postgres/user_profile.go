@@ -21,6 +21,7 @@ type UpsertUserProfileParams struct {
 	LastRequestedSlot          string
 	LastRequestedUserTurnCount int
 	CollectionPausedUntilTurn  int
+	PendingSlotsJSON           []byte
 }
 
 func (s *Store) GetUserProfileByUserID(ctx context.Context, userID int64) (model.UserProfile, error) {
@@ -46,6 +47,7 @@ SELECT
     COALESCE(last_requested_slot, ''),
     last_requested_user_turn_count,
     collection_paused_until_turn,
+    COALESCE(pending_slots_jsonb, '{}'::jsonb),
     created_at,
     updated_at
 FROM tg_user_profiles
@@ -74,6 +76,7 @@ WHERE user_id = $1
 		&profile.LastRequestedSlot,
 		&profile.LastRequestedUserTurnCount,
 		&profile.CollectionPausedUntilTurn,
+		&profile.PendingSlotsJSON,
 		&profile.CreatedAt,
 		&profile.UpdatedAt,
 	)
@@ -105,7 +108,8 @@ INSERT INTO tg_user_profiles (
     affiliation_confirmed_at,
     last_requested_slot,
     last_requested_user_turn_count,
-    collection_paused_until_turn
+    collection_paused_until_turn,
+    pending_slots_jsonb
 ) VALUES (
     $1,
     NULLIF($2, ''),
@@ -126,7 +130,8 @@ INSERT INTO tg_user_profiles (
     CASE WHEN NULLIF($9, '') IS NULL THEN NULL ELSE NOW() END,
     NULLIF($10, ''),
     GREATEST($11, 0),
-    GREATEST($12, 0)
+    GREATEST($12, 0),
+    COALESCE($13, '{}'::jsonb)
 )
 ON CONFLICT (user_id) DO UPDATE
 SET
@@ -155,6 +160,10 @@ SET
         WHEN GREATEST(EXCLUDED.collection_paused_until_turn, 0) = 0 THEN tg_user_profiles.collection_paused_until_turn
         ELSE GREATEST(EXCLUDED.collection_paused_until_turn, 0)
     END,
+    pending_slots_jsonb = CASE
+        WHEN $13 IS NULL THEN tg_user_profiles.pending_slots_jsonb
+        ELSE COALESCE($13, '{}'::jsonb)
+    END,
     updated_at = NOW()
 RETURNING
     user_id,
@@ -177,6 +186,7 @@ RETURNING
     COALESCE(last_requested_slot, ''),
     last_requested_user_turn_count,
     collection_paused_until_turn,
+    COALESCE(pending_slots_jsonb, '{}'::jsonb),
     created_at,
     updated_at
 `
@@ -197,6 +207,7 @@ RETURNING
 		params.LastRequestedSlot,
 		params.LastRequestedUserTurnCount,
 		params.CollectionPausedUntilTurn,
+		params.PendingSlotsJSON,
 	).Scan(
 		&profile.UserID,
 		&profile.NameValue,
@@ -218,6 +229,7 @@ RETURNING
 		&profile.LastRequestedSlot,
 		&profile.LastRequestedUserTurnCount,
 		&profile.CollectionPausedUntilTurn,
+		&profile.PendingSlotsJSON,
 		&profile.CreatedAt,
 		&profile.UpdatedAt,
 	)

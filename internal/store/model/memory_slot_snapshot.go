@@ -1,10 +1,11 @@
 package model
 
 type MemorySlotSnapshot struct {
-	SessionID         int64
-	RecentMessages    []Message
-	TopicSlots        []TopicSlot
-	ConversationState ConversationStateSlot
+	SessionID                int64
+	RecentMessages           []Message
+	TopicSlots               []TopicSlot
+	ConversationState        ConversationStateSlot
+	ConversationStateMachine ConversationStateMachine
 }
 
 type MemorySlotAnalysisResult struct {

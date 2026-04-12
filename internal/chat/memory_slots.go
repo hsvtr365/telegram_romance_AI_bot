@@ -3,19 +3,21 @@ package chat
 import (
 	"encoding/json"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
-	"github.com/hsvtr365/telegram_romance_AI_bot/internal/ollama"
+	"github.com/hsvtr365/telegram_romance_AI_bot/internal/promptutil"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/store/model"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/textutil"
 )
 
 type MemoryPromptSections struct {
-	ActiveTopicsText      string
-	ConversationStateText string
-	OpenLoopsText         string
-	MemorySummary         string
+	ActiveTopicsText             string
+	ConversationStateText        string
+	ConversationStateMachineText string
+	OpenLoopsText                string
+	MemorySummary                string
 }
 
 func BuildMemoryPromptSections(slots []model.TopicSlot, state model.ConversationStateSlot) MemoryPromptSections {
@@ -23,10 +25,7 @@ func BuildMemoryPromptSections(slots []model.TopicSlot, state model.Conversation
 
 	var topicLines []string
 	for _, slot := range visibleTopics {
-		line := strings.TrimSpace(slot.TopicLabel)
-		if summary := strings.TrimSpace(slot.Summary); summary != "" {
-			line += " | " + summary
-		}
+		line := buildTopicPromptLine(slot)
 		if line != "" {
 			topicLines = append(topicLines, line)
 		}
@@ -49,6 +48,9 @@ func BuildMemoryPromptSections(slots []model.TopicSlot, state model.Conversation
 		if value := strings.TrimSpace(state.FocusTopicKey); value != "" {
 			stateLines = append(stateLines, "focus_topic="+value)
 		}
+		if value := formatPromptTimeKV("updated_at", state.UpdatedAt); value != "" {
+			stateLines = append(stateLines, value)
+		}
 	}
 
 	openLoopText := ""
@@ -69,6 +71,31 @@ func BuildMemoryPromptSections(slots []model.TopicSlot, state model.Conversation
 
 func BuildMemorySummary(slots []model.TopicSlot, state model.ConversationStateSlot) string {
 	return BuildMemoryPromptSections(slots, state).MemorySummary
+}
+
+func BuildMemoryPromptSectionsFromStateMachine(slots []model.TopicSlot, state model.ConversationStateMachine) MemoryPromptSections {
+	visibleTopics := filterPromptTopicSlots(slots)
+
+	var topicLines []string
+	for _, slot := range visibleTopics {
+		line := buildTopicPromptLine(slot)
+		if line != "" {
+			topicLines = append(topicLines, line)
+		}
+	}
+
+	stateLines := buildConversationStateMachineLines(state)
+	sections := MemoryPromptSections{
+		ActiveTopicsText:             strings.Join(topicLines, "\n"),
+		ConversationStateMachineText: strings.Join(stateLines, "\n"),
+		OpenLoopsText:                strings.TrimSpace(state.OpenLoopSummary),
+	}
+	sections.MemorySummary = buildMemorySummaryText(sections)
+	return sections
+}
+
+func BuildMemorySummaryFromStateMachine(slots []model.TopicSlot, state model.ConversationStateMachine) string {
+	return BuildMemoryPromptSectionsFromStateMachine(slots, state).MemorySummary
 }
 
 func MergeMemorySlotAnalysis(existing []model.TopicSlot, existingState model.ConversationStateSlot, result model.MemorySlotAnalysisResult, sourceMessageID int64, at time.Time) ([]model.TopicSlot, model.ConversationStateSlot) {
@@ -173,22 +200,12 @@ func MergeMemorySlotAnalysis(existing []model.TopicSlot, existingState model.Con
 	return slots, state
 }
 
-func memoryMessagesFromRecentConversation(recent []ollama.Message) []model.Message {
-	out := make([]model.Message, 0, len(recent))
-	for _, msg := range recent {
-		out = append(out, model.Message{
-			Role:    msg.Role,
-			Content: msg.Content,
-		})
-	}
-	return out
-}
-
 func shouldAnalyzeMemorySlots(input string, minChars int) bool {
 	if minChars <= 0 {
-		minChars = 16
+		minChars = 5
 	}
-	return len([]rune(cleanMemoryText(input))) >= minChars
+	cleaned := cleanMemoryText(input)
+	return len([]rune(cleaned)) >= minChars
 }
 
 func normalizeTopicSlotKey(value string) string {
@@ -222,10 +239,12 @@ func topicKeyFromLabel(label string) string {
 func filterPromptTopicSlots(slots []model.TopicSlot) []model.TopicSlot {
 	filtered := make([]model.TopicSlot, 0, len(slots))
 	for _, slot := range slots {
-		if slot.Status != model.TopicSlotStatusActive {
+		status := normalizeTopicStatus(slot.Status)
+		if status != model.TopicSlotStatusActive && status != model.TopicSlotStatusWatch {
 			continue
 		}
 		confidence := normalizeConfidence(slot.Confidence)
+		// Hide weak one-off topics from the prompt until they recur at least once.
 		if confidence == model.ConfidenceLow && slot.MentionCount < 2 {
 			continue
 		}
@@ -246,13 +265,32 @@ func filterPromptTopicSlots(slots []model.TopicSlot) []model.TopicSlot {
 }
 
 func shouldInjectConversationState(state model.ConversationStateSlot) bool {
-	return normalizeConfidence(state.Confidence) != model.ConfidenceLow
+	return state.CurrentStage != "" || state.EmotionalTone != ""
+}
+
+func shouldInjectConversationStateMachine(state model.ConversationStateMachine) bool {
+	return strings.TrimSpace(state.TonePhase) != "" ||
+		strings.TrimSpace(state.RelationalStage) != "" ||
+		strings.TrimSpace(state.StageDirection) != "" ||
+		strings.TrimSpace(state.EmotionalTone) != "" ||
+		strings.TrimSpace(state.InteractionMode) != "" ||
+		strings.TrimSpace(state.FocusTopicKey) != "" ||
+		strings.TrimSpace(state.OpenLoopSummary) != "" ||
+		strings.TrimSpace(state.Confidence) != "" ||
+		state.Revision != 0 ||
+		state.SafetyLockUntilTurn != 0 ||
+		state.LastSourceMessageID != 0 ||
+		strings.TrimSpace(state.LastDecisionSource) != "" ||
+		len(state.EvidenceJSON) > 0
 }
 
 func buildMemorySummaryText(sections MemoryPromptSections) string {
 	parts := make([]string, 0, 3)
 	if strings.TrimSpace(sections.ActiveTopicsText) != "" {
 		parts = append(parts, "[Active Topic Slots]\n"+strings.TrimSpace(sections.ActiveTopicsText))
+	}
+	if strings.TrimSpace(sections.ConversationStateMachineText) != "" {
+		parts = append(parts, "[Conversation State Machine]\n"+strings.TrimSpace(sections.ConversationStateMachineText))
 	}
 	if strings.TrimSpace(sections.ConversationStateText) != "" {
 		parts = append(parts, "[Conversation State]\n"+strings.TrimSpace(sections.ConversationStateText))
@@ -261,6 +299,75 @@ func buildMemorySummaryText(sections MemoryPromptSections) string {
 		parts = append(parts, "[Open Loops]\n"+strings.TrimSpace(sections.OpenLoopsText))
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+func buildConversationStateMachineLines(state model.ConversationStateMachine) []string {
+	if !shouldInjectConversationStateMachine(state) {
+		return nil
+	}
+
+	lines := make([]string, 0, 10)
+	if value := strings.TrimSpace(state.TonePhase); value != "" {
+		lines = append(lines, "tone_phase="+value)
+	}
+	if value := strings.TrimSpace(state.RelationalStage); value != "" {
+		lines = append(lines, "relational_stage="+value)
+	}
+	if value := strings.TrimSpace(state.StageDirection); value != "" {
+		lines = append(lines, "stage_direction="+value)
+	}
+	if value := strings.TrimSpace(state.EmotionalTone); value != "" {
+		lines = append(lines, "emotional_tone="+value)
+	}
+	if value := strings.TrimSpace(state.InteractionMode); value != "" {
+		lines = append(lines, "interaction_mode="+value)
+	}
+	if value := strings.TrimSpace(state.FocusTopicKey); value != "" {
+		lines = append(lines, "focus_topic_key="+value)
+	}
+	if value := strings.TrimSpace(state.OpenLoopSummary); value != "" {
+		lines = append(lines, "open_loop_summary="+value)
+	}
+	if state.SafetyLockUntilTurn != 0 {
+		lines = append(lines, "safety_lock_until_turn="+strconv.FormatInt(int64(state.SafetyLockUntilTurn), 10))
+	}
+	if value := strings.TrimSpace(state.Confidence); value != "" {
+		lines = append(lines, "confidence="+value)
+	}
+	if state.Revision != 0 {
+		lines = append(lines, "revision="+strconv.FormatInt(state.Revision, 10))
+	}
+	if state.LastSourceMessageID != 0 {
+		lines = append(lines, "last_source_message_id="+strconv.FormatInt(state.LastSourceMessageID, 10))
+	}
+	if value := strings.TrimSpace(state.LastDecisionSource); value != "" {
+		lines = append(lines, "last_decision_source="+value)
+	}
+	if value := formatPromptTimeKV("updated_at", state.UpdatedAt); value != "" {
+		lines = append(lines, value)
+	}
+	return lines
+}
+
+func buildTopicPromptLine(slot model.TopicSlot) string {
+	line := strings.TrimSpace(slot.TopicLabel)
+	if line == "" {
+		return ""
+	}
+	if summary := strings.TrimSpace(slot.Summary); summary != "" {
+		line += " | " + summary
+	}
+	if value := formatPromptTimeKV("last_seen_at", slot.LastSeenAt); value != "" {
+		line += " | " + value
+	}
+	return line
+}
+
+func formatPromptTimeKV(label string, value time.Time) string {
+	if strings.TrimSpace(label) == "" || value.IsZero() {
+		return ""
+	}
+	return label + "=" + promptutil.FormatPromptTimestamp(value)
 }
 
 func mergeConversationStateSlot(existing model.ConversationStateSlot, analyzed model.AnalyzedConversationState, sourceMessageID int64, at time.Time) model.ConversationStateSlot {

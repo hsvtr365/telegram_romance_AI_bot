@@ -105,9 +105,6 @@ func (a *MemorySlotAnalyzer) AsyncEnqueue(sessionID int64, sourceMessageID int64
 	if a == nil || a.runner == nil || sessionID == 0 || sourceMessageID == 0 {
 		return
 	}
-	if !shouldAnalyzeMemorySlots(input, a.cfg.MinChars) {
-		return
-	}
 
 	job := memorySlotJob{
 		sessionID:       sessionID,
@@ -195,20 +192,12 @@ func (a *MemorySlotAnalyzer) buildAsyncCommit(ctx context.Context, job memorySlo
 		return nil, nil
 	}
 
-	mergedTopics, mergedState := MergeMemorySlotAnalysis(snapshot.TopicSlots, snapshot.ConversationState, *result, job.sourceMessageID, time.Now().UTC())
+	mergedTopics, _ := MergeMemorySlotAnalysis(snapshot.TopicSlots, snapshot.ConversationState, *result, job.sourceMessageID, time.Now().UTC())
 	return func(commitCtx context.Context) error {
 		if len(mergedTopics) > 0 {
 			if _, err := a.store.UpsertTopicSlots(commitCtx, job.sessionID, mergedTopics); err != nil {
 				if a.logger != nil {
 					a.logger.Warn("failed to upsert topic slots", "session_id", job.sessionID, "error", err)
-				}
-				return err
-			}
-		}
-		if hasConversationStateContent(mergedState) {
-			if _, err := a.store.UpsertConversationStateSlot(commitCtx, job.sessionID, mergedState); err != nil {
-				if a.logger != nil {
-					a.logger.Warn("failed to upsert conversation state slot", "session_id", job.sessionID, "error", err)
 				}
 				return err
 			}
@@ -245,7 +234,7 @@ func memorySlotTaskKey(sessionID int64) string {
 func parseMemorySlotAnalysisResult(raw string) (model.MemorySlotAnalysisResult, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
-		return model.MemorySlotAnalysisResult{}, fmt.Errorf("empty memory slot analysis response")
+		return model.MemorySlotAnalysisResult{}, nil
 	}
 
 	trimmed = strings.TrimPrefix(trimmed, "```json")
@@ -257,11 +246,14 @@ func parseMemorySlotAnalysisResult(raw string) (model.MemorySlotAnalysisResult, 
 	end := strings.LastIndex(trimmed, "}")
 	if start >= 0 && end >= start {
 		trimmed = trimmed[start : end+1]
+	} else {
+		// No JSON skeleton found at all
+		return model.MemorySlotAnalysisResult{}, nil
 	}
 
 	var result model.MemorySlotAnalysisResult
 	if err := json.Unmarshal([]byte(trimmed), &result); err != nil {
-		return model.MemorySlotAnalysisResult{}, fmt.Errorf("decode memory slot analysis: %w", err)
+		return model.MemorySlotAnalysisResult{}, fmt.Errorf("decode memory slot analysis: %w (raw length: %d)", err, len(trimmed))
 	}
 
 	for idx := range result.Topics {
@@ -286,13 +278,4 @@ func parseMemorySlotAnalysisResult(raw string) (model.MemorySlotAnalysisResult, 
 	result.ConversationState.Confidence = normalizeConfidence(result.ConversationState.Confidence)
 
 	return result, nil
-}
-
-func hasConversationStateContent(slot model.ConversationStateSlot) bool {
-	return strings.TrimSpace(slot.CurrentStage) != "" ||
-		strings.TrimSpace(slot.StageDirection) != "" ||
-		strings.TrimSpace(slot.EmotionalTone) != "" ||
-		strings.TrimSpace(slot.InteractionMode) != "" ||
-		strings.TrimSpace(slot.OpenLoopSummary) != "" ||
-		strings.TrimSpace(slot.FocusTopicKey) != ""
 }
