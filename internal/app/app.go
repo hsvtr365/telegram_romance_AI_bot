@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/chat"
@@ -18,29 +19,27 @@ import (
 )
 
 type App struct {
-	cfg        config.Config
-	logger     *slog.Logger
-	poller     *telegram.Poller
-	httpServer *httpserver.Server
-	proactive  *proactive.Scheduler
-	holiday    *holiday.Syncer
-	store      *store.Manager
+	cfg           config.Config
+	logger        *slog.Logger
+	poller        *telegram.Poller
+	httpServer    *httpserver.Server
+	proactive     *proactive.Scheduler
+	holiday       *holiday.Syncer
+	store         *store.Manager
+	modelMonitors []backgroundRunner
+}
+
+type backgroundRunner interface {
+	Run(ctx context.Context) error
 }
 
 func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, error) {
 	tgClient := telegram.NewClient(cfg.Telegram.BotToken, logger)
 
-	ollamaClient := ollama.NewClient(ollama.Config{
-		BaseURL:     cfg.Ollama.BaseURL,
-		Model:       cfg.Ollama.Model,
-		TimeoutSec:  cfg.Ollama.TimeoutSec,
-		KeepAlive:   cfg.Ollama.KeepAlive,
-		NumCtx:      cfg.Ollama.NumCtx,
-		Temperature: cfg.Ollama.Temperature,
-		TopP:        cfg.Ollama.TopP,
-	}, logger)
+	ollamaClient, mainMonitor := buildPrimaryLLM(cfg.Ollama, logger)
+	modelMonitors := collectRunner(mainMonitor)
 
-	reminderLLM := buildVariantLLM(
+	reminderLLM, reminderMonitor := buildVariantLLM(
 		cfg.Ollama,
 		cfg.Proactive.ReminderModel,
 		cfg.Proactive.ReminderBaseURL,
@@ -53,8 +52,9 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		},
 		logger,
 	)
+	modelMonitors = appendRunner(modelMonitors, reminderMonitor)
 
-	structuredLLM := buildVariantLLM(
+	structuredLLM, structuredMonitor := buildVariantLLM(
 		cfg.Ollama,
 		cfg.Chat.StructuredModel,
 		cfg.Chat.StructuredBaseURL,
@@ -68,8 +68,9 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		},
 		logger,
 	)
+	modelMonitors = appendRunner(modelMonitors, structuredMonitor)
 
-	memorySlotLLM := buildVariantLLM(
+	memorySlotLLM, memorySlotMonitor := buildVariantLLM(
 		cfg.Ollama,
 		cfg.Chat.MemorySlotModel,
 		cfg.Chat.MemorySlotBaseURL,
@@ -83,10 +84,12 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		},
 		logger,
 	)
+	modelMonitors = appendRunner(modelMonitors, memorySlotMonitor)
 
 	var stateReviewLLM chat.LLM
 	if cfg.Chat.StateReviewEnabled {
-		stateReviewLLM = buildVariantLLM(
+		var stateReviewMonitor backgroundRunner
+		stateReviewLLM, stateReviewMonitor = buildVariantLLM(
 			cfg.Ollama,
 			coalesce(cfg.Chat.StateReviewModel, cfg.Chat.StructuredModel),
 			coalesce(cfg.Chat.StateReviewBaseURL, cfg.Chat.StructuredBaseURL),
@@ -100,6 +103,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 			},
 			logger,
 		)
+		modelMonitors = appendRunner(modelMonitors, stateReviewMonitor)
 	}
 
 	conversationStore, err := store.New(ctx, store.Config{
@@ -171,13 +175,14 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	}
 
 	return &App{
-		cfg:        cfg,
-		logger:     logger,
-		poller:     poller,
-		httpServer: httpServer,
-		proactive:  proactiveScheduler,
-		holiday:    holidaySyncer,
-		store:      conversationStore,
+		cfg:           cfg,
+		logger:        logger,
+		poller:        poller,
+		httpServer:    httpServer,
+		proactive:     proactiveScheduler,
+		holiday:       holidaySyncer,
+		store:         conversationStore,
+		modelMonitors: modelMonitors,
 	}, nil
 }
 
@@ -216,6 +221,15 @@ func (a *App) Run(ctx context.Context) error {
 		}()
 	}
 
+	for _, monitor := range a.modelMonitors {
+		if monitor == nil {
+			continue
+		}
+		go func(runner backgroundRunner) {
+			errCh <- runner.Run(ctx)
+		}(monitor)
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -250,7 +264,39 @@ func coalesce(value, fallback string) string {
 	return fallback
 }
 
-func buildVariantLLM(baseCfg config.OllamaConfig, model, baseURL string, tune func(ollama.Config) ollama.Config, logger *slog.Logger) chat.LLM {
+func buildPrimaryLLM(baseCfg config.OllamaConfig, logger *slog.Logger) (chat.LLM, backgroundRunner) {
+	endpoints := baseCfg.Endpoints
+	if len(endpoints) == 0 {
+		endpoints = []config.OllamaEndpoint{{
+			BaseURL: baseCfg.BaseURL,
+			Model:   baseCfg.Model,
+		}}
+	}
+
+	clients := make([]*ollama.Client, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		cfg := ollama.Config{
+			BaseURL:     endpoint.BaseURL,
+			Model:       endpoint.Model,
+			TimeoutSec:  baseCfg.TimeoutSec,
+			KeepAlive:   baseCfg.KeepAlive,
+			NumCtx:      baseCfg.NumCtx,
+			Temperature: baseCfg.Temperature,
+			TopP:        baseCfg.TopP,
+		}
+		clients = append(clients, ollama.NewClient(cfg, logger))
+	}
+
+	pool := ollama.NewEndpointPoolClient(
+		clients,
+		time.Duration(baseCfg.HealthCheckIntervalSec)*time.Second,
+		logger,
+	)
+
+	return pool, pool
+}
+
+func buildVariantLLM(baseCfg config.OllamaConfig, model, baseURL string, tune func(ollama.Config) ollama.Config, logger *slog.Logger) (chat.LLM, backgroundRunner) {
 	model = coalesce(model, baseCfg.Model)
 	baseURL = coalesce(baseURL, baseCfg.BaseURL)
 
@@ -266,5 +312,85 @@ func buildVariantLLM(baseCfg config.OllamaConfig, model, baseURL string, tune fu
 	if tune != nil {
 		cfg = tune(cfg)
 	}
-	return ollama.NewClient(cfg, logger)
+	baseURLs := resolveVariantBaseURLs(baseCfg, cfg.BaseURL, model != baseCfg.Model)
+
+	clients := make([]*ollama.Client, 0, len(baseURLs))
+	for _, currentBaseURL := range baseURLs {
+		clientCfg := cfg
+		clientCfg.BaseURL = currentBaseURL
+		clients = append(clients, ollama.NewClient(clientCfg, logger))
+	}
+
+	pool := ollama.NewEndpointPoolClient(
+		clients,
+		time.Duration(baseCfg.HealthCheckIntervalSec)*time.Second,
+		logger,
+	)
+
+	return pool, pool
+}
+
+func resolveVariantBaseURLs(baseCfg config.OllamaConfig, preferredBaseURL string, forceSingle bool) []string {
+	if preferredBaseURL == "" {
+		return baseCfg.BaseURLs
+	}
+	if forceSingle {
+		return []string{preferredBaseURL}
+	}
+
+	if len(baseCfg.BaseURLs) == 0 {
+		return []string{preferredBaseURL}
+	}
+
+	if !containsBaseURL(baseCfg.BaseURLs, preferredBaseURL) {
+		return []string{preferredBaseURL}
+	}
+
+	return moveBaseURLToFront(baseCfg.BaseURLs, preferredBaseURL)
+}
+
+func containsBaseURL(values []string, target string) bool {
+	target = normalizeBaseURL(target)
+	for _, value := range values {
+		if normalizeBaseURL(value) == target {
+			return true
+		}
+	}
+	return false
+}
+
+func moveBaseURLToFront(values []string, target string) []string {
+	target = normalizeBaseURL(target)
+	out := make([]string, 0, len(values))
+	var front string
+	for _, value := range values {
+		if normalizeBaseURL(value) == target {
+			front = value
+			continue
+		}
+		out = append(out, value)
+	}
+	if front != "" {
+		out = append([]string{front}, out...)
+	}
+	return out
+}
+
+func normalizeBaseURL(value string) string {
+	value = strings.TrimSpace(value)
+	return strings.TrimRight(value, "/")
+}
+
+func collectRunner(runner backgroundRunner) []backgroundRunner {
+	if runner == nil {
+		return nil
+	}
+	return []backgroundRunner{runner}
+}
+
+func appendRunner(runners []backgroundRunner, runner backgroundRunner) []backgroundRunner {
+	if runner == nil {
+		return runners
+	}
+	return append(runners, runner)
 }

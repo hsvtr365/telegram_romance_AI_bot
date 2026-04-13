@@ -77,7 +77,12 @@ APP_PORT=8083
 
 TELEGRAM_BOT_TOKEN=...
 
+OLLAMA_ENDPOINT_01_BASE_URL=https://gitlab.swempire.co.kr/ollama
+OLLAMA_ENDPOINT_01_MODEL=gemma4-heretic:q4km
+OLLAMA_ENDPOINT_02_BASE_URL=http://127.0.0.1:11434
+OLLAMA_ENDPOINT_02_MODEL=gemma4-26b-heretic-q4km:latest
 OLLAMA_BASE_URL=https://gitlab.swempire.co.kr/ollama
+OLLAMA_HEALTHCHECK_INTERVAL_SEC=1800
 OLLAMA_MODEL=gemma4-heretic:q4km
 
 POSTGRES_DSN=postgres://...
@@ -89,7 +94,12 @@ REDIS_URL=redis://...
 기본 설정은 원격 reverse proxy를 사용한다.
 
 ```env
+OLLAMA_ENDPOINT_01_BASE_URL=https://gitlab.swempire.co.kr/ollama
+OLLAMA_ENDPOINT_01_MODEL=gemma4-heretic:q4km
+OLLAMA_ENDPOINT_02_BASE_URL=http://127.0.0.1:11434
+OLLAMA_ENDPOINT_02_MODEL=gemma4-26b-heretic-q4km:latest
 OLLAMA_BASE_URL=https://gitlab.swempire.co.kr/ollama
+OLLAMA_HEALTHCHECK_INTERVAL_SEC=1800
 OLLAMA_MODEL=gemma4-heretic:q4km
 ```
 
@@ -99,7 +109,11 @@ OLLAMA_MODEL=gemma4-heretic:q4km
 curl https://gitlab.swempire.co.kr/ollama/api/tags
 ```
 
-다른 모델로 바꾸고 싶으면 `.env`의 `OLLAMA_MODEL`만 바꾸면 된다.
+단일 서버만 쓸 때는 `OLLAMA_BASE_URL`, `OLLAMA_MODEL`만 써도 된다.
+
+서버마다 모델명이 다를 수 있으면 `OLLAMA_ENDPOINT_01_BASE_URL`, `OLLAMA_ENDPOINT_01_MODEL`처럼 순번별로 짝을 맞춰 넣으면 된다.
+봇은 번호가 작은 endpoint부터 healthy한 서버를 우선 사용하고, 연결 실패나 5xx가 나면 다음 서버로 즉시 넘어간다.
+또한 `OLLAMA_HEALTHCHECK_INTERVAL_SEC` 주기로 unhealthy 서버의 `/api/tags`를 다시 확인해서 살아나면 원래 우선순위대로 복귀한다.
 
 ## 로컬에서 실행하는 법
 

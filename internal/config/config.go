@@ -31,13 +31,22 @@ type TelegramConfig struct {
 }
 
 type OllamaConfig struct {
-	BaseURL     string
-	Model       string
-	TimeoutSec  int
-	KeepAlive   string
-	NumCtx      int
-	Temperature float64
-	TopP        float64
+	Endpoints              []OllamaEndpoint
+	BaseURL                string
+	BaseURLs               []string
+	FallbackBaseURL        string
+	HealthCheckIntervalSec int
+	Model                  string
+	TimeoutSec             int
+	KeepAlive              string
+	NumCtx                 int
+	Temperature            float64
+	TopP                   float64
+}
+
+type OllamaEndpoint struct {
+	BaseURL string
+	Model   string
 }
 
 type StorageConfig struct {
@@ -104,6 +113,31 @@ func Load(dotenvPath string) (Config, error) {
 		return Config{}, err
 	}
 
+	baseURL := envString("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+	baseURLs := envCSV("OLLAMA_BASE_URLS", nil)
+	fallbackBaseURL := envString("OLLAMA_FALLBACK_BASE_URL", "")
+	model := envString("OLLAMA_MODEL", "gemma4:4b")
+	endpoints := envOllamaEndpoints()
+	if len(baseURLs) == 0 {
+		baseURLs = uniqueNonEmptyStrings(baseURL, fallbackBaseURL)
+	}
+	if len(baseURLs) == 0 {
+		baseURLs = []string{"http://127.0.0.1:11434"}
+	}
+	if len(endpoints) == 0 {
+		for _, currentBaseURL := range baseURLs {
+			endpoints = append(endpoints, OllamaEndpoint{
+				BaseURL: currentBaseURL,
+				Model:   model,
+			})
+		}
+	}
+	if len(endpoints) > 0 {
+		baseURLs = endpointBaseURLs(endpoints)
+		baseURL = endpoints[0].BaseURL
+		model = endpoints[0].Model
+	}
+
 	cfg := Config{
 		App: AppConfig{
 			Name: envString("APP_NAME", "heartlink-bot"),
@@ -117,13 +151,17 @@ func Load(dotenvPath string) (Config, error) {
 			PollLimit:      envInt("TELEGRAM_POLL_LIMIT", 50),
 		},
 		Ollama: OllamaConfig{
-			BaseURL:     envString("OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
-			Model:       envString("OLLAMA_MODEL", "gemma4:4b"),
-			TimeoutSec:  envInt("OLLAMA_TIMEOUT_SEC", 35),
-			KeepAlive:   envString("OLLAMA_KEEP_ALIVE", "10m"),
-			NumCtx:      envInt("OLLAMA_NUM_CTX", 4096),
-			Temperature: envFloat("OLLAMA_TEMPERATURE", 0.9),
-			TopP:        envFloat("OLLAMA_TOP_P", 0.9),
+			Endpoints:              endpoints,
+			BaseURL:                baseURL,
+			BaseURLs:               baseURLs,
+			FallbackBaseURL:        fallbackBaseURL,
+			HealthCheckIntervalSec: envInt("OLLAMA_HEALTHCHECK_INTERVAL_SEC", 1800),
+			Model:                  model,
+			TimeoutSec:             envInt("OLLAMA_TIMEOUT_SEC", 35),
+			KeepAlive:              envString("OLLAMA_KEEP_ALIVE", "10m"),
+			NumCtx:                 envInt("OLLAMA_NUM_CTX", 4096),
+			Temperature:            envFloat("OLLAMA_TEMPERATURE", 0.9),
+			TopP:                   envFloat("OLLAMA_TOP_P", 0.9),
 		},
 		Storage: StorageConfig{
 			PostgresDSN: strings.TrimSpace(os.Getenv("POSTGRES_DSN")),
@@ -278,6 +316,34 @@ func envCSV(key string, fallback []string) []string {
 	return result
 }
 
+func envOllamaEndpoints() []OllamaEndpoint {
+	endpoints := make([]OllamaEndpoint, 0, 4)
+	for idx := 1; idx <= 20; idx++ {
+		suffix := fmt.Sprintf("%02d", idx)
+		baseURL := envString("OLLAMA_ENDPOINT_"+suffix+"_BASE_URL", "")
+		model := envString("OLLAMA_ENDPOINT_"+suffix+"_MODEL", "")
+		if baseURL == "" && model == "" {
+			continue
+		}
+		if baseURL == "" || model == "" {
+			continue
+		}
+		endpoints = append(endpoints, OllamaEndpoint{
+			BaseURL: baseURL,
+			Model:   model,
+		})
+	}
+	return endpoints
+}
+
+func endpointBaseURLs(endpoints []OllamaEndpoint) []string {
+	baseURLs := make([]string, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		baseURLs = append(baseURLs, endpoint.BaseURL)
+	}
+	return baseURLs
+}
+
 func envBool(key string, fallback bool) bool {
 	value := strings.TrimSpace(strings.ToLower(os.Getenv(key)))
 	if value == "" {
@@ -292,4 +358,23 @@ func envBool(key string, fallback bool) bool {
 	default:
 		return fallback
 	}
+}
+
+func uniqueNonEmptyStrings(values ...string) []string {
+	result := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+
+	return result
 }

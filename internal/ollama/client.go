@@ -34,11 +34,6 @@ type Client struct {
 }
 
 func NewClient(cfg Config, logger *slog.Logger) *Client {
-	timeout := time.Duration(cfg.TimeoutSec) * time.Second
-	if timeout <= 0 {
-		timeout = 35 * time.Second
-	}
-
 	return &Client{
 		baseURL:     strings.TrimRight(cfg.BaseURL, "/"),
 		model:       cfg.Model,
@@ -47,7 +42,7 @@ func NewClient(cfg Config, logger *slog.Logger) *Client {
 		temperature: cfg.Temperature,
 		topP:        cfg.TopP,
 		httpClient: &http.Client{
-			Timeout: timeout,
+			Timeout: normalizeTimeout(cfg.TimeoutSec),
 		},
 		logger: logger,
 	}
@@ -98,4 +93,36 @@ func (c *Client) Chat(ctx context.Context, messages []Message) (string, error) {
 	}
 
 	return strings.TrimSpace(response.Message.Content), nil
+}
+
+func (c *Client) CheckHealth(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/tags", nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("ollama health returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	return nil
+}
+
+func normalizeTimeout(timeoutSec int) time.Duration {
+	timeout := time.Duration(timeoutSec) * time.Second
+	if timeout <= 0 {
+		return 35 * time.Second
+	}
+	return timeout
 }
