@@ -237,7 +237,7 @@ func buildBatchReviewWindowSummary(messages []model.Message) string {
 }
 
 func (s *Service) enqueueProfileBatchReview(conversation *store.ConversationContext, userTurnCount int, sourceMessageID int64) {
-	if s == nil || s.store == nil || s.profileBatchReviewer == nil || s.profileReviewRunner == nil || conversation == nil {
+	if s == nil || s.store == nil || s.profileBatchReviewer == nil || s.analyticRunner == nil || conversation == nil {
 		return
 	}
 	if conversation.User.ID == 0 || conversation.Session.ID == 0 || userTurnCount == 0 || userTurnCount%profileBatchReviewInterval != 0 {
@@ -251,7 +251,7 @@ func (s *Service) enqueueProfileBatchReview(conversation *store.ConversationCont
 	userID := conversation.User.ID
 	sessionID := conversation.Session.ID
 
-	s.profileReviewRunner.Enqueue(AsyncTask{
+	s.analyticRunner.Enqueue(AsyncTask{
 		Key:     fmt.Sprintf("profile_batch_review:%d", userID),
 		Version: version,
 		Build: func(ctx context.Context) (func(context.Context) error, error) {
@@ -351,6 +351,9 @@ func (s *Service) applyProfileBatchReview(ctx context.Context, userID int64, con
 			}
 
 			assignProfileSlotValue(&patch, decision.SlotName, value)
+			if s.logger != nil {
+				s.logger.Info("profile slot confirmed by batch review", "user_id", userID, "slot", decision.SlotName, "value", value)
+			}
 			if err := s.store.UpdateProfileCandidateStatus(ctx, pgstore.UpdateProfileCandidateStatusParams{
 				UserID:          userID,
 				SlotName:        candidate.SlotName,

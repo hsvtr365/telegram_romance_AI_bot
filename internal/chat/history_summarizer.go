@@ -31,7 +31,7 @@ func (s *Service) updateHistorySummaryAsync(sessionID int64, recentLimit int) {
 	// Let's use the structuredRunner or memoryAnalyzer's runner for now if appropriate, 
 	// but those are keyed. Let's just use a goroutine or a dedicated task in structuredRunner.
 	
-	s.structuredRunner.Enqueue(AsyncTask{
+	s.analyticRunner.Enqueue(AsyncTask{
 		Key:     fmt.Sprintf("history_summary:%d", sessionID),
 		Version: time.Now().Unix(), // Always run if triggered
 		Build: func(ctx context.Context) (func(context.Context) error, error) {

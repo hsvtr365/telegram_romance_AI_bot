@@ -44,7 +44,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		cfg.Proactive.ReminderModel,
 		cfg.Proactive.ReminderBaseURL,
 		func(base ollama.Config) ollama.Config {
-			base.TimeoutSec = maxInt(10, minInt(base.TimeoutSec, 20))
+			// Use base.TimeoutSec directly from config
 			base.KeepAlive = "5m"
 			base.NumCtx = minInt(base.NumCtx, 1024)
 			base.Temperature = 0.8
@@ -59,7 +59,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		cfg.Chat.StructuredModel,
 		cfg.Chat.StructuredBaseURL,
 		func(base ollama.Config) ollama.Config {
-			base.TimeoutSec = maxInt(15, minInt(base.TimeoutSec, 240))
+			base.TimeoutSec = maxInt(120, minInt(base.TimeoutSec, 240))
 			base.KeepAlive = "3m"
 			base.NumCtx = minInt(base.NumCtx, 768)
 			base.Temperature = 0.1
@@ -75,7 +75,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		cfg.Chat.MemorySlotModel,
 		cfg.Chat.MemorySlotBaseURL,
 		func(base ollama.Config) ollama.Config {
-			base.TimeoutSec = maxInt(15, minInt(base.TimeoutSec, 240))
+			base.TimeoutSec = maxInt(120, minInt(base.TimeoutSec, 240))
 			base.KeepAlive = "3m"
 			base.NumCtx = minInt(base.NumCtx, 1024)
 			base.Temperature = 0.2
@@ -94,7 +94,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 			coalesce(cfg.Chat.StateReviewModel, cfg.Chat.StructuredModel),
 			coalesce(cfg.Chat.StateReviewBaseURL, cfg.Chat.StructuredBaseURL),
 			func(base ollama.Config) ollama.Config {
-				base.TimeoutSec = maxInt(8, minInt(base.TimeoutSec, 20))
+				// Use base.TimeoutSec directly from config
 				base.KeepAlive = "2m"
 				base.NumCtx = minInt(base.NumCtx, 768)
 				base.Temperature = 0.1

@@ -120,7 +120,7 @@ func NewPhaseJudge(llm LLM, timeout time.Duration) *PhaseJudge {
 		return nil
 	}
 	if timeout <= 0 {
-		timeout = 1200 * time.Millisecond
+		timeout = 5 * time.Second
 	}
 	return &PhaseJudge{
 		llm:     llm,

@@ -177,8 +177,8 @@ func Load(dotenvPath string) (Config, error) {
 			StateReviewEnabled:       envBool("CHAT_STATE_REVIEW_ENABLED", true),
 			StateReviewModel:         envString("CHAT_STATE_REVIEW_MODEL", ""),
 			StateReviewBaseURL:       envString("CHAT_STATE_REVIEW_BASE_URL", ""),
-			StateReviewTimeoutMs:     envInt("CHAT_STATE_REVIEW_TIMEOUT_MS", 1200),
-			StateReviewWorkers:       envInt("CHAT_STATE_REVIEW_WORKERS", 2),
+			StateReviewTimeoutMs:     envInt("CHAT_STATE_REVIEW_TIMEOUT_MS", 120000), // Default 120 seconds, local LLMs are slow
+			StateReviewWorkers:       envInt("CHAT_STATE_REVIEW_WORKERS", 1),
 			StateReviewQueueSize:     envInt("CHAT_STATE_REVIEW_QUEUE_SIZE", 32),
 			StructuredExtract:        envBool("CHAT_STRUCTURED_EXTRACT_ENABLED", true),
 			StructuredMinChars:       envInt("CHAT_STRUCTURED_EXTRACT_MIN_CHARS", 1),

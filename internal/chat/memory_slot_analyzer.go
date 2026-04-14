@@ -37,7 +37,7 @@ type memorySlotJob struct {
 	input           string
 }
 
-func NewMemorySlotAnalyzer(cfg MemorySlotConfig, llm LLM, conversationStore *store.Manager, logger *slog.Logger) *MemorySlotAnalyzer {
+func NewMemorySlotAnalyzer(cfg MemorySlotConfig, llm LLM, conversationStore *store.Manager, runner *AsyncRunner, logger *slog.Logger) *MemorySlotAnalyzer {
 	if !cfg.Enabled || llm == nil || conversationStore == nil {
 		return nil
 	}
@@ -45,10 +45,10 @@ func NewMemorySlotAnalyzer(cfg MemorySlotConfig, llm LLM, conversationStore *sto
 		cfg.MinChars = 16
 	}
 	if cfg.SyncTimeout <= 0 {
-		cfg.SyncTimeout = 700 * time.Millisecond
+		cfg.SyncTimeout = 20 * time.Second
 	}
 	if cfg.AsyncTimeout <= 0 {
-		cfg.AsyncTimeout = 6 * time.Second
+		cfg.AsyncTimeout = 300 * time.Second
 	}
 	if cfg.Workers <= 0 {
 		cfg.Workers = 2
@@ -66,11 +66,7 @@ func NewMemorySlotAnalyzer(cfg MemorySlotConfig, llm LLM, conversationStore *sto
 		store:         conversationStore,
 		promptBuilder: NewMemorySlotPromptBuilder(),
 		logger:        logger,
-		runner: NewAsyncRunner(AsyncRunnerConfig{
-			Workers:   cfg.Workers,
-			QueueSize: cfg.QueueSize,
-			Timeout:   cfg.AsyncTimeout,
-		}, logger),
+		runner: runner,
 	}
 
 	return analyzer

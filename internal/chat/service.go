@@ -55,10 +55,9 @@ type Service struct {
 	stateReviewer        *AsyncStateReviewer
 	stateReviewRunner    *AsyncRunner
 	profileBatchReviewer *AsyncProfileBatchReviewer
-	profileReviewRunner  *AsyncRunner
 	extractor            *StructuredExtractor
 	memoryAnalyzer       *MemorySlotAnalyzer
-	structuredRunner     *AsyncRunner
+	analyticRunner       *AsyncRunner
 	holidayResolver      holiday.ContextResolver
 	logger               *slog.Logger
 
@@ -81,16 +80,16 @@ func NewService(cfg Config, bot Messenger, llm LLM, reminderLLM LLM, structuredL
 		cfg.MemorySlotSyncTimeoutMs = 0
 	}
 	if cfg.MemorySlotAsyncTimeoutMs <= 0 {
-		cfg.MemorySlotAsyncTimeoutMs = 90000
+		cfg.MemorySlotAsyncTimeoutMs = 300000
 	}
 	if cfg.MemorySlotWorkers <= 0 {
-		cfg.MemorySlotWorkers = 2
+		cfg.MemorySlotWorkers = 1
 	}
 	if cfg.MemorySlotQueueSize <= 0 {
 		cfg.MemorySlotQueueSize = 32
 	}
 	if cfg.StateReviewTimeoutMs <= 0 {
-		cfg.StateReviewTimeoutMs = 1200
+		cfg.StateReviewTimeoutMs = 300000
 	}
 	if cfg.StateReviewWorkers <= 0 {
 		cfg.StateReviewWorkers = 2
@@ -104,24 +103,18 @@ func NewService(cfg Config, bot Messenger, llm LLM, reminderLLM LLM, structuredL
 		extractor = NewStructuredExtractor(structuredLLM, cfg.StructuredExtractMinChars)
 	}
 
-	var structuredRunner *AsyncRunner
-	if extractor != nil && conversationStore != nil {
-		structuredRunner = NewAsyncRunner(AsyncRunnerConfig{
-			Workers:   structuredExtractWorkers,
-			QueueSize: structuredExtractQueueSize,
-			Timeout:   structuredExtractTimeout,
+	var analyticRunner *AsyncRunner
+	if (extractor != nil || cfg.MemorySlotEnabled) && conversationStore != nil {
+		analyticRunner = NewAsyncRunner(AsyncRunnerConfig{
+			Workers:   1,
+			QueueSize: 64,
+			Timeout:   300 * time.Second,
 		}, logger)
 	}
 
 	var profileBatchReviewer *AsyncProfileBatchReviewer
-	var profileReviewRunner *AsyncRunner
 	if extractor != nil && conversationStore != nil {
 		profileBatchReviewer = NewAsyncProfileBatchReviewer(structuredLLM)
-		profileReviewRunner = NewAsyncRunner(AsyncRunnerConfig{
-			Workers:   profileBatchReviewWorkers,
-			QueueSize: profileBatchReviewQueueSize,
-			Timeout:   profileBatchReviewTimeout,
-		}, logger)
 	}
 
 	var memoryAnalyzer *MemorySlotAnalyzer
@@ -134,7 +127,7 @@ func NewService(cfg Config, bot Messenger, llm LLM, reminderLLM LLM, structuredL
 			Workers:         cfg.MemorySlotWorkers,
 			QueueSize:       cfg.MemorySlotQueueSize,
 			RecentTurnLimit: cfg.RecentTurnLimit,
-		}, memorySlotLLM, conversationStore, logger)
+		}, memorySlotLLM, conversationStore, analyticRunner, logger)
 	}
 
 	fastState := NewFastStateEvaluator(cfg.PhaseRulesPath, logger)
@@ -164,10 +157,10 @@ func NewService(cfg Config, bot Messenger, llm LLM, reminderLLM LLM, structuredL
 		stateReviewer:         reviewer,
 		stateReviewRunner:     stateReviewRunner,
 		profileBatchReviewer:  profileBatchReviewer,
-		profileReviewRunner:   profileReviewRunner,
 		extractor:             extractor,
 		memoryAnalyzer:        memoryAnalyzer,
-		structuredRunner:      structuredRunner,
+		analyticRunner:        analyticRunner,
+		holidayResolver:       holiday.NewResolver(conversationStore, holiday.ResolverConfig{}, logger),
 		logger:                logger,
 		generationCoordinator: NewGenerationCoordinator(),
 		chatLocks:             make(map[int64]*sync.Mutex),
@@ -290,28 +283,6 @@ func (s *Service) HandleUpdate(ctx context.Context, update telegram.Update) erro
 	var holidaySelection *holiday.Selection
 	holidayContext := ""
 	topicsForPrompt := conversation.TopicSlots
-	if s.memoryAnalyzer != nil {
-		syncResult, err := s.memoryAnalyzer.SyncAnalyze(ctx, MemorySlotAnalyzeInput{
-			Snapshot: model.MemorySlotSnapshot{
-				SessionID:                conversation.Session.ID,
-				RecentMessages:           conversation.RecentConversation,
-				TopicSlots:               conversation.TopicSlots,
-				ConversationStateMachine: conversation.ConversationStateMachine,
-			},
-			CurrentUserInput: input,
-		})
-		if err != nil {
-			s.logger.Debug("memory slot sync analyze skipped", "session_id", conversation.Session.ID, "error", err)
-		} else if syncResult != nil {
-			topicsForPrompt, _ = MergeMemorySlotAnalysis(
-				conversation.TopicSlots,
-				model.ConversationStateSlot{},
-				*syncResult,
-				userMessage.ID,
-				messageTimestamp(*update.Message),
-			)
-		}
-	}
 	regenCount := 0
 	waitBeforeFirstGenerate := true
 	promptGenerated := false
@@ -467,7 +438,7 @@ generateLoop:
 	}
 
 	// Trigger history summarization every 10 turns, starting from turn 30
-	if userTurnCount >= s.cfg.RecentTurnLimit && userTurnCount%10 == 0 {
+	if userTurnCount >= s.cfg.RecentTurnLimit && userTurnCount%30 == 0 {
 		s.updateHistorySummaryAsync(conversation.Session.ID, s.cfg.RecentTurnLimit)
 	}
 

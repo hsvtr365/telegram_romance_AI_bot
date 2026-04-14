@@ -9,9 +9,9 @@ import (
 )
 
 const (
-	profileBatchReviewInterval    = 30
-	profileBatchReviewWindowTurns = 30
-	profileBatchReviewTimeout     = 1500 * time.Millisecond
+	profileBatchReviewInterval    = 5
+	profileBatchReviewWindowTurns = 15
+	profileBatchReviewTimeout     = 300 * time.Second
 	profileBatchReviewWorkers     = 1
 	profileBatchReviewQueueSize   = 16
 )
@@ -25,11 +25,11 @@ type extractedProfileCandidate struct {
 	Confidence      string
 }
 
-func extractProfileCandidatesFromStructuredProfile(profile structuredProfile, input string) []extractedProfileCandidate {
+func extractProfileCandidatesFromStructuredProfile(profile structuredProfile, input string, history []model.Message) []extractedProfileCandidate {
 	candidates := make([]extractedProfileCandidate, 0, 8)
 
 	push := func(slot string, field structuredField) {
-		if candidate, ok := profileCandidateFromStructuredField(slot, field, input); ok {
+		if candidate, ok := profileCandidateFromStructuredField(slot, field, input, history); ok {
 			candidates = append(candidates, candidate)
 		}
 	}
@@ -46,19 +46,34 @@ func extractProfileCandidatesFromStructuredProfile(profile structuredProfile, in
 	return candidates
 }
 
-func profileCandidateFromStructuredField(slot string, field structuredField, input string) (extractedProfileCandidate, bool) {
+func profileCandidateFromStructuredField(slot string, field structuredField, input string, history []model.Message) (extractedProfileCandidate, bool) {
 	value := normalizeStructuredProfileValue(slot, field)
 	if value == "" {
 		return extractedProfileCandidate{}, false
 	}
 
 	evidenceType := normalizeStructuredEvidenceType(field.EvidenceType)
-	if evidenceType != "explicit" && evidenceType != "tentative" {
-		return extractedProfileCandidate{}, false
+	if evidenceType == "none" || evidenceType == "" {
+		// FALLBACK: If value is explicitly found in current input, treat as explicit
+		if value != "" && hasStructuredEvidenceText(input, value) {
+			evidenceType = "explicit"
+		} else {
+			return extractedProfileCandidate{}, false
+		}
 	}
 
 	evidenceText := strings.TrimSpace(field.EvidenceText)
-	if !hasStructuredEvidenceText(input, evidenceText) {
+	evidenceFound := false
+	if evidenceText != "" && hasStructuredEvidenceTextInContext(input, history, evidenceText) {
+		evidenceFound = true
+	}
+	// Fallback to searching for the value itself if explicit evidence text was not found
+	if !evidenceFound && value != "" && hasStructuredEvidenceTextInContext(input, history, value) {
+		evidenceText = value
+		evidenceFound = true
+	}
+
+	if !evidenceFound {
 		return extractedProfileCandidate{}, false
 	}
 
@@ -72,13 +87,43 @@ func profileCandidateFromStructuredField(slot string, field structuredField, inp
 	}, true
 }
 
+func hasStructuredEvidenceTextInContext(input string, history []model.Message, evidenceText string) bool {
+	// 1. Check current input
+	if hasStructuredEvidenceText(input, evidenceText) {
+		return true
+	}
+
+	// 2. Check history
+	var combined strings.Builder
+	for _, m := range history {
+		if m.Role == "user" {
+			if hasStructuredEvidenceText(m.Content, evidenceText) {
+				return true
+			}
+			combined.WriteString(m.Content)
+			combined.WriteString(" ")
+		}
+	}
+
+	// 3. Check combined context
+	combined.WriteString(input)
+	if hasStructuredEvidenceText(combined.String(), evidenceText) {
+		return true
+	}
+
+	return false
+}
+
 func hasStructuredEvidenceText(input string, evidenceText string) bool {
 	input = normalizeInput(input)
 	evidenceText = normalizeInput(evidenceText)
 	if input == "" || evidenceText == "" {
 		return false
 	}
-	return strings.Contains(input, evidenceText)
+	
+	inNoSpace := strings.ReplaceAll(input, " ", "")
+	evNoSpace := strings.ReplaceAll(evidenceText, " ", "")
+	return strings.Contains(inNoSpace, evNoSpace)
 }
 
 func normalizeStructuredEvidenceType(value string) string {

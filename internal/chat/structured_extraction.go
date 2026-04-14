@@ -19,8 +19,8 @@ type StructuredExtractor struct {
 }
 
 const (
-	structuredExtractTimeout   = 240 * time.Second
-	structuredExtractWorkers   = 2
+	structuredExtractTimeout   = 300 * time.Second
+	structuredExtractWorkers   = 1
 	structuredExtractQueueSize = 32
 )
 
@@ -79,9 +79,41 @@ type structuredProfile struct {
 }
 
 type structuredTrait struct {
-	TraitType  string `json:"trait_type"`
-	Value      string `json:"value"`
-	Confidence string `json:"confidence"`
+	TraitType    string `json:"trait_type"`
+	Value        string `json:"value"`
+	Confidence   string `json:"confidence"`
+	EvidenceType string `json:"evidence_type"`
+}
+
+func (s *structuredTrait) UnmarshalJSON(data []byte) error {
+	// 1. Try to unmarshal as the standard object
+	type alias struct {
+		TraitType    string `json:"trait_type"`
+		Value        string `json:"value"`
+		Confidence   string `json:"confidence"`
+		EvidenceType string `json:"evidence_type"`
+	}
+	var a alias
+	if err := json.Unmarshal(data, &a); err == nil {
+		s.TraitType = a.TraitType
+		s.Value = a.Value
+		s.Confidence = a.Confidence
+		s.EvidenceType = a.EvidenceType
+		return nil
+	}
+
+	// 2. Try to unmarshal as a raw string
+	var val string
+	if err := json.Unmarshal(data, &val); err == nil {
+		s.Value = val
+		s.TraitType = "like" // Assume string statements are typically likes/preferences in this context
+		s.Confidence = "medium"
+		s.EvidenceType = "explicit"
+		return nil
+	}
+
+	// If everything fails, ignore it rather than crash the whole payload
+	return nil
 }
 
 type structuredExtractionPayload struct {
@@ -121,17 +153,16 @@ func (s *Service) captureUserSignals(ctx context.Context, userID int64, input st
 		return
 	}
 
-	// Capture profile slots with sync small-model extraction into candidate storage.
-	s.captureUserProfileSlots(ctx, userID, input, conversation, sourceVersion)
-
-	// Delegate broader trait/profile discovery to async LLM runner.
+	// Delegate all profile and trait extraction to the async LLM runner.
+	// Synchronous extraction is unnecessary because the main model already receives
+	// the recent conversation history (30 turns) which includes the latest input.
 	if s.shouldUseStructuredExtraction(input) {
 		s.dispatchStructuredExtraction(userID, conversation.RecentConversation, input, sourceVersion)
 	}
 }
 
 func (s *Service) dispatchStructuredExtraction(userID int64, history []model.Message, input string, sourceVersion int64) {
-	if s == nil || s.extractor == nil || s.store == nil || s.structuredRunner == nil || userID == 0 {
+	if s == nil || s.extractor == nil || s.store == nil || s.analyticRunner == nil || userID == 0 {
 		return
 	}
 
@@ -139,17 +170,22 @@ func (s *Service) dispatchStructuredExtraction(userID int64, history []model.Mes
 		sourceVersion = time.Now().UnixNano()
 	}
 
-	s.structuredRunner.Enqueue(AsyncTask{
-		Key:     "", // Do not supersede structured extractions to process all inputs
+	s.analyticRunner.Enqueue(AsyncTask{
+		Key:     structuredExtractionTaskKey(userID),
 		Version: sourceVersion,
 		Build: func(ctx context.Context) (func(context.Context) error, error) {
 			extracted, err := s.extractor.Extract(ctx, ollamaMessagesFromConversation(history), input)
 			if err != nil {
-				s.logger.Warn("structured extraction failed", "user_id", userID, "error", err)
+				if s.logger != nil {
+					s.logger.Warn("structured extraction failed", "user_id", userID, "error", err)
+				}
 				return nil, err
 			}
 			return func(commitCtx context.Context) error {
-				s.persistStructuredExtraction(commitCtx, userID, input, extracted)
+				if s.logger != nil {
+					s.logger.Info("structured extraction success, persisting...", "user_id", userID, "has_profile", extracted.hasData())
+				}
+				s.persistStructuredExtraction(commitCtx, userID, input, history, extracted, sourceVersion)
 				return nil
 			}, nil
 		},
@@ -178,11 +214,12 @@ func (s *Service) dispatchStructuredExtraction(userID int64, history []model.Mes
 	})
 }
 
-func (s *Service) persistStructuredExtraction(ctx context.Context, userID int64, input string, extracted structuredExtractionPayload) {
+func (s *Service) persistStructuredExtraction(ctx context.Context, userID int64, input string, history []model.Message, extracted structuredExtractionPayload, sourceMessageID int64) {
 	if s == nil || s.store == nil || userID == 0 {
 		return
 	}
 
+	// 1. Persist Traits (Additive)
 	traits := mergeStructuredTraits(nil, extracted.Traits)
 	for _, trait := range traits {
 		if _, err := s.store.UpsertUserTrait(ctx, pgstore.UpsertUserTraitParams{
@@ -195,6 +232,56 @@ func (s *Service) persistStructuredExtraction(ctx context.Context, userID int64,
 			s.logger.Warn("failed to persist structured trait extraction", "user_id", userID, "trait_type", trait.TraitType, "value", trait.Value, "error", err)
 		}
 	}
+
+	// 2. Persist Profile Candidates (Fallback for sync timeout)
+	candidates := extractProfileCandidatesFromStructuredProfile(extracted.Profile, input, history)
+	capturedAt := time.Now()
+	for _, candidate := range candidates {
+		if candidate.NormalizedValue == "" {
+			continue
+		}
+		if _, err := s.store.MergeProfileCandidate(ctx, pgstore.MergeProfileCandidateParams{
+			UserID:           userID,
+			SlotName:         candidate.SlotName,
+			CandidateValue:   candidate.CandidateValue,
+			NormalizedValue:  candidate.NormalizedValue,
+			BestEvidenceType: candidate.EvidenceType,
+			BestConfidence:   candidate.Confidence,
+			Evidence: model.ProfileCandidateEvidence{
+				MessageID:    sourceMessageID,
+				EvidenceText: candidate.EvidenceText,
+				EvidenceType: candidate.EvidenceType,
+				Confidence:   candidate.Confidence,
+				CapturedAt:   capturedAt,
+			},
+		}); err != nil && s.logger != nil {
+			s.logger.Warn("failed to merge profile candidate (async)", "user_id", userID, "slot", candidate.SlotName, "value", candidate.CandidateValue, "error", err)
+		}
+	}
+}
+
+func (s *Service) extractStructuredProfileCandidates(ctx context.Context, history []model.Message, input string) ([]extractedProfileCandidate, error) {
+	if s.extractor == nil {
+		return nil, nil
+	}
+	extracted, err := s.extractor.Extract(ctx, ollamaMessagesFromConversation(history), input)
+	if err != nil {
+		return nil, err
+	}
+	return extractProfileCandidatesFromStructuredProfile(extracted.Profile, input, history), nil
+}
+
+func (s *Service) extractStructuredProfilePatch(ctx context.Context, history []model.Message, input string, existingProfile model.UserProfile) (pgstore.UpsertUserProfileParams, error) {
+	candidates, err := s.extractStructuredProfileCandidates(ctx, history, input)
+	if err != nil {
+		return pgstore.UpsertUserProfileParams{}, err
+	}
+
+	var patch pgstore.UpsertUserProfileParams
+	for _, c := range candidates {
+		assignProfileSlotValue(&patch, c.SlotName, c.CandidateValue)
+	}
+	return patch, nil
 }
 
 func (s *Service) shouldUseStructuredExtraction(input string) bool {
@@ -203,7 +290,7 @@ func (s *Service) shouldUseStructuredExtraction(input string) bool {
 	}
 
 	normalized := normalizeInput(input)
-	if len([]rune(normalized)) < s.extractor.minChars {
+	if len([]rune(normalized)) < 2 { // Increased minimum slightly to skip pure noise/reactions
 		return false
 	}
 
@@ -240,29 +327,32 @@ Do not infer or guess. Use empty string when unclear.
 IMPORTANT: Extract ONLY the core value (e.g., just the name "수지", not "수지라고 불러").
 
 Rules for Profile Fields:
-- name: The user's name. Extract ONLY the name itself, NO verbs or suffixes like "라고 불러", "이야", "입니다".
-- gender: MUST be "남성" or "여성"
-- age: Use digits like "25" or "1990년생"
+- name: The user's name. Extract ONLY the name itself. 
+  * ABSOLUTELY NO verbs or suffixes like "라고 불러", "이야", "입니다", "야".
+  * If the user says "내 이름은 김수지", extract "김수지".
+- gender: MUST be "남성" or "여성".
+- age: Use digits like "25" or "1990년생".
 
-Rules for Traits:
-- 'value' MUST be the exact core noun/object. Do NOT include subjects or verbs.
+Rules for Traits (likes/avoidances):
+- 'value' MUST be the exact core noun/object/activity (e.g., "야식", "축구").
+- extract ONLY when the user explicitly mentions a preference.
+- NEVER extract meta-traits, personality impressions, or conversation status (e.g., "친근함", "기억력", "말 많음", "대화 중").
 - If the user explicitly states they don't like, avoid, or hate something, use 'avoid'.
 - If the user explicitly states they like or enjoy something, use 'like'.
-- If the user explicitly retracts a previous statement, denies liking/avoiding, or says they don't care anymore, use 'delete'.
-- confidence: high | medium | low
+- If the user explicitly retracts a previous statement, use 'delete'.
 
 Evidence Rules:
 - evidence_type must be one of: explicit | tentative | inferred | none
-- explicit: the latest user input directly states the fact about the user
-- tentative: the latest user input weakly/self-speculatively suggests the fact (examples: "개발자일지도", "아마 개발 쪽")
-- inferred: history or implication suggests it, but the latest user input does not directly state it
-- none: no usable evidence
-- evidence_text must quote the shortest supporting span from the latest user input when evidence_type is explicit or tentative
-- If the latest user input does not support the field, prefer inferred or none and keep value empty unless the fact is directly stated in the latest user input
-- Never treat assistant messages as evidence
+- explicit: the latest user input directly states the fact about the user.
+- tentative: the latest user input weakly/self-speculatively suggests the fact.
+- inferred: history suggest it, but the latest input does not directly state it. Use this for Traits ONLY if history is overwhelmingly clear.
+- none: no usable evidence.
+- evidence_text must quote the shortest supporting span from the latest user input when evidence_type is explicit or tentative.
+- If the latest user input does not support a field, keep value empty and set evidence_type to none.
+- Never treat assistant messages as evidence.
 
 Schema Template (MUST follow exactly):
-{"profile":{"name":{"value":"","confidence":"low","evidence_text":"","evidence_type":"none"},"gender":{"value":"","confidence":"low","evidence_text":"","evidence_type":"none"},"age":{"value":"","confidence":"low","evidence_text":"","evidence_type":"none"},"job":{"value":"","confidence":"low","evidence_text":"","evidence_type":"none"},"current_focus":{"value":"","confidence":"low","evidence_text":"","evidence_type":"none"},"hobby":{"value":"","confidence":"low","evidence_text":"","evidence_type":"none"},"location":{"value":"","confidence":"low","evidence_text":"","evidence_type":"none"},"affiliation":{"value":"","confidence":"low","evidence_text":"","evidence_type":"none"}},"traits":[{"trait_type":"like","value":"","confidence":"low"}]}
+{"profile":{"name":{"value":"","confidence":"high","evidence_text":"","evidence_type":"none"},"gender":{"value":"","confidence":"high","evidence_text":"","evidence_type":"none"},"age":{"value":"","confidence":"high","evidence_text":"","evidence_type":"none"},"job":{"value":"","confidence":"high","evidence_text":"","evidence_type":"none"},"current_focus":{"value":"","confidence":"high","evidence_text":"","evidence_type":"none"},"hobby":{"value":"","confidence":"high","evidence_text":"","evidence_type":"none"},"location":{"value":"","confidence":"high","evidence_text":"","evidence_type":"none"},"affiliation":{"value":"","confidence":"high","evidence_text":"","evidence_type":"none"}},"traits":[{"trait_type":"like","value":"","confidence":"high","evidence_type":"explicit"}]}
 `),
 		},
 		{
@@ -471,11 +561,12 @@ func normalizeStructuredProfileValue(slot string, field structuredField) string 
 	switch slot {
 	case profileSlotName:
 		value = cleanSlotValue(value)
-		for _, suffix := range []string{"라고 불러", "라고 해", "이라구", "이야", "에요", "예요", "입니다", "야", "이"} {
+		// More aggressive suffix removal to capture names in various speech styles
+		for _, suffix := range []string{"라고 불러", "라고 해", "이라구", "이야", "에요", "예요", "입니다", "이야기", "이구요", "구요", "고요", "요", "야", "이"} {
 			value = strings.TrimSuffix(value, suffix)
 		}
 		value = strings.TrimSpace(value)
-		if value == "" || len([]rune(value)) < 2 || len([]rune(value)) > 8 || looksLikeNonName(value) {
+		if value == "" || len([]rune(value)) < 1 || len([]rune(value)) > 12 || looksLikeNonName(value) {
 			return ""
 		}
 		return value
@@ -518,6 +609,12 @@ func mergeStructuredTraits(base []extractedTrait, extra []structuredTrait) []ext
 		if !acceptStructuredTraitConfidence(normalizeConfidence(item.Confidence)) {
 			continue
 		}
+		// Traits must have explicit or tentative evidence to prevent hallucinated meta-traits
+		evidence := normalizeStructuredEvidenceType(item.EvidenceType)
+		if evidence != "explicit" && evidence != "tentative" {
+			continue
+		}
+
 		traitType := strings.TrimSpace(item.TraitType)
 		if traitType != userTraitLike && traitType != userTraitAvoid && traitType != userTraitAllergy && traitType != userTraitDelete {
 			continue

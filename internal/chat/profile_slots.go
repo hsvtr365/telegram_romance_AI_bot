@@ -310,7 +310,7 @@ func isPositiveAffirmation(input string) bool {
 func cleanSlotValue(value string) string {
 	cleaned := strings.TrimSpace(value)
 	cleaned = strings.Trim(cleaned, ".,!? ")
-	for _, suffix := range []string{"라고 불러", "라고 해", "이야", "이에요", "예요", "야", "입니다", "은", "는", "이", "가"} {
+	for _, suffix := range []string{"라고 불러", "라고 해", "이라구", "이야", "이에요", "예요", "야", "입니다", "은", "는", "이", "가"} {
 		cleaned = strings.TrimSpace(strings.TrimSuffix(cleaned, suffix))
 	}
 	if isUnknownProfileValue(cleaned) {
