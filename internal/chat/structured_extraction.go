@@ -320,38 +320,39 @@ func (e *StructuredExtractor) Extract(ctx context.Context, history []ollama.Mess
 		{
 			Role: "system",
 			Content: strings.TrimSpace(`
-Extract user profile candidates from the latest user input.
-Return one JSON object only. No markdown.
-Use conversation history only to resolve pronouns or ellipsis. Never use history alone as evidence.
-Do not infer or guess. Use empty string when unclear.
-IMPORTANT: Extract ONLY the core value (e.g., just the name "수지", not "수지라고 불러").
+최신 사용자 입력에서 유저 프로필 후보와 특징(Traits)을 추출하세요.
+반드시 하나의 JSON 객체만 반환하고, 마크다운(Code Fence 등)은 포함하지 마세요.
+대화 기록은 대명사나 생략된 맥락을 보완하는 용도로만 사용하고, 기록 그 자체를 증거로 사용하지 마세요.
+추측하지 마세요. 확실하지 않은 경우 빈 문자열("")을 사용하세요.
+중요: 오직 핵심 값만 추출하세요 (예: "수지라고 불러" 대신 "수지").
 
-Rules for Profile Fields:
-- name: The user's name. Extract ONLY the name itself. 
-  * ABSOLUTELY NO verbs or suffixes like "라고 불러", "이야", "입니다", "야".
-  * If the user says "내 이름은 김수지", extract "김수지".
-- gender: MUST be "남성" or "여성".
-- age: Use digits like "25" or "1990년생".
+[프로필 필드 규칙]
+- name: 사용자 이름. 이름만 추출하세요. 
+  * "라고 불러", "이야", "입니다", "야" 같은 동사나 접미사는 절대로 포함하지 마세요.
+  * 사용자가 "내 이름은 김수지"라고 하면, "김수지"만 추출합니다.
+- gender: 반드시 "남성" 또는 "여성" 중 하나여야 합니다.
+- age: "25" 또는 "1990년생"과 같이 숫자나 생년월일을 사용하세요.
 
-Rules for Traits (likes/avoidances):
-- 'value' MUST be the exact core noun/object/activity (e.g., "야식", "축구").
-- extract ONLY when the user explicitly mentions a preference.
-- NEVER extract meta-traits, personality impressions, or conversation status (e.g., "친근함", "기억력", "말 많음", "대화 중").
-- If the user explicitly states they don't like, avoid, or hate something, use 'avoid'.
-- If the user explicitly states they like or enjoy something, use 'like'.
-- If the user explicitly retracts a previous statement, use 'delete'.
+[특징(Traits) 규칙 - 취향 및 기피 항목]
+- 'value'는 반드시 사용자 본인이 직접 좋아하거나 싫어한다고 밝힌 **구체적인 명사나 대상, 구체적인 활동**이어야 합니다 (예: "야식", "축구", "공포영화").
+- 사용자가 명시적으로 선호나 기피를 언급했을 때만 추출하세요.
+- **절대로** 대화의 분위기, 사용자의 현재 기분, 추상적인 성격 특징, 또는 대화의 상태를 추출하지 마세요.
+  * 금지 예시: "친근함", "호기심", "기대감", "열정적", "확신에 차 있음", "애교 있음", "기억력", "말 많음", "대화 중" 등.
+- 사용자가 싫어하거나, 피하거나, 혐오하는 것을 말하면 trait_type을 'avoid'로 설정하세요.
+- 사용자가 좋아하거나, 즐기는 것을 말하면 trait_type을 'like'로 설정하세요.
+- 사용자가 이전 진술을 철회하는 경우 trait_type을 'delete'로 설정하세요.
 
-Evidence Rules:
-- evidence_type must be one of: explicit | tentative | inferred | none
-- explicit: the latest user input directly states the fact about the user.
-- tentative: the latest user input weakly/self-speculatively suggests the fact.
-- inferred: history suggest it, but the latest input does not directly state it. Use this for Traits ONLY if history is overwhelmingly clear.
-- none: no usable evidence.
-- evidence_text must quote the shortest supporting span from the latest user input when evidence_type is explicit or tentative.
-- If the latest user input does not support a field, keep value empty and set evidence_type to none.
-- Never treat assistant messages as evidence.
+[증거(Evidence) 규칙]
+- evidence_type은 다음 중 하나여야 합니다: explicit | tentative | inferred | none
+- explicit: 최신 입력에 사실이 직접적으로 명시됨.
+- tentative: 최신 입력에 사실이 약하게 또는 추측성으로 암시됨.
+- inferred: 대화 기록이 명확히 암시하지만 최신 입력에는 직접 나타나지 않음 (Traits 추출 시 매우 명확할 때만 사용).
+- none: 활용 가능한 증거 없음.
+- evidence_text: evidence_type이 explicit 또는 tentative일 때, 최신 입력에서 해당 사실을 뒷받침하는 가장 짧은 문구를 인용하세요.
+- 최신 입력에 해당 필드에 대한 근거가 없으면 value를 비우고 evidence_type을 none으로 설정하세요.
+- 어시스턴트(AI)의 메시지는 절대로 증거로 채택하지 마세요.
 
-Schema Template (MUST follow exactly):
+[스키마 템플릿 (반드시 이 형식을 따를 것)]
 {"profile":{"name":{"value":"","confidence":"high","evidence_text":"","evidence_type":"none"},"gender":{"value":"","confidence":"high","evidence_text":"","evidence_type":"none"},"age":{"value":"","confidence":"high","evidence_text":"","evidence_type":"none"},"job":{"value":"","confidence":"high","evidence_text":"","evidence_type":"none"},"current_focus":{"value":"","confidence":"high","evidence_text":"","evidence_type":"none"},"hobby":{"value":"","confidence":"high","evidence_text":"","evidence_type":"none"},"location":{"value":"","confidence":"high","evidence_text":"","evidence_type":"none"},"affiliation":{"value":"","confidence":"high","evidence_text":"","evidence_type":"none"}},"traits":[{"trait_type":"like","value":"","confidence":"high","evidence_type":"explicit"}]}
 `),
 		},

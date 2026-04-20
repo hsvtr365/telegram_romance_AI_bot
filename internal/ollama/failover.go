@@ -206,6 +206,10 @@ func isFailoverEligible(err error) bool {
 		return true
 	case strings.Contains(lower, "ollama health returned 5"):
 		return true
+	case strings.Contains(lower, "openai-compatible returned 5"):
+		return true
+	case strings.Contains(lower, "openai-compatible health returned 5"):
+		return true
 	default:
 		return false
 	}

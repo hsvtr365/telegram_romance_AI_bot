@@ -7,6 +7,7 @@ import (
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/chat"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/ollama"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/promptutil"
+	"github.com/hsvtr365/telegram_romance_AI_bot/internal/store/model"
 )
 
 type PromptInput struct {
@@ -18,6 +19,7 @@ type PromptInput struct {
 	EventNote          string
 	HolidayContextText string
 	RecentConversation []ConversationMessage
+	CustomSlots        []model.CustomSlot
 }
 
 type PromptBuilder struct{}
@@ -42,6 +44,17 @@ func (b *PromptBuilder) Build(input PromptInput) []ollama.Message {
 		fmt.Sprintf("length: %s", input.Strategy.Length),
 		fmt.Sprintf("seed: %s", strings.TrimSpace(input.Seed.Text)),
 	})
+
+	if len(input.CustomSlots) > 0 {
+		var slotsSb strings.Builder
+		slotsSb.WriteString("!! [IMPORTANT: OVERRIDE ALL OTHER RULES] !!\n")
+		slotsSb.WriteString("아래 설정은 사용자가 직접 지정한 '최우선 지침' 이다.\n")
+		slotsSb.WriteString("기존의 페르소나, 말투(Tone), 대화 단계(Phase) 규칙과 충돌하면 아래 내용을 최우선으로 준수하여 응답하라.\n\n")
+		for _, slot := range input.CustomSlots {
+			slotsSb.WriteString(fmt.Sprintf("- %s\n", slot.Content))
+		}
+		promptutil.WriteSection(&userSection, "User Custom Settings (Absolute Priority)", slotsSb.String())
+	}
 
 	promptutil.WriteSection(&userSection, "Relationship Note", input.RelationshipNote)
 	promptutil.WriteSection(&userSection, "Event Note", input.EventNote)

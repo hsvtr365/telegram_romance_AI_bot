@@ -289,9 +289,9 @@ func buildMemorySummaryText(sections MemoryPromptSections) string {
 	if strings.TrimSpace(sections.ActiveTopicsText) != "" {
 		parts = append(parts, "[Active Topic Slots]\n"+strings.TrimSpace(sections.ActiveTopicsText))
 	}
-	if strings.TrimSpace(sections.ConversationStateMachineText) != "" {
-		parts = append(parts, "[Conversation State Machine]\n"+strings.TrimSpace(sections.ConversationStateMachineText))
-	}
+	// if strings.TrimSpace(sections.ConversationStateMachineText) != "" {
+	// 	parts = append(parts, "[Conversation State Machine]\n"+strings.TrimSpace(sections.ConversationStateMachineText))
+	// }
 	if strings.TrimSpace(sections.ConversationStateText) != "" {
 		parts = append(parts, "[Conversation State]\n"+strings.TrimSpace(sections.ConversationStateText))
 	}

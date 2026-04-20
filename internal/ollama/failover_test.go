@@ -91,6 +91,47 @@ func TestEndpointPoolClientSkipsKnownUnhealthyEndpointOnNextRequest(t *testing.T
 	}
 }
 
+func TestEndpointPoolClientSupportsOpenAICompatibleEndpoint(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/chat/completions":
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(OpenAIChatResponse{
+				Model: "mlx-test",
+				Choices: []OpenAIChatChoice{{
+					Index: 0,
+					Message: OpenAIChatMessage{
+						Role:    "assistant",
+						Content: "mlx-ok",
+					},
+				}},
+			}); err != nil {
+				t.Fatalf("encode response: %v", err)
+			}
+		case "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"mlx-test"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewEndpointPoolClient([]*Client{
+		NewClient(Config{BaseURL: server.URL + "/v1", Model: "mlx-test", TimeoutSec: 2}, nil),
+	}, time.Minute, nil)
+
+	reply, err := client.Chat(context.Background(), []Message{{Role: "user", Content: "hello"}})
+	if err != nil {
+		t.Fatalf("Chat returned error: %v", err)
+	}
+	if reply != "mlx-ok" {
+		t.Fatalf("expected mlx-ok reply, got %q", reply)
+	}
+}
+
 func newChatTestServer(t *testing.T, status int, content string) *httptest.Server {
 	t.Helper()
 

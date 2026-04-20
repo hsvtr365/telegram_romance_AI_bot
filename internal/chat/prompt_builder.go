@@ -28,6 +28,7 @@ type PromptInput struct {
 	ActiveTopicsText         string
 	ConversationStateText    string
 	OpenLoopsText            string
+	CustomSlots              []model.CustomSlot
 }
 
 type PromptBuilder struct{}
@@ -39,12 +40,25 @@ func NewPromptBuilder() *PromptBuilder {
 func (b *PromptBuilder) Build(input PromptInput) []ollama.Message {
 	var userSection strings.Builder
 
-	chatBoundary := "이 대화는 오직 텔레그램 메신저 안에서만 이루어지는 연락이다. 같은 공간에 있거나 곧 실제로 만날 것처럼 말하지 않는다. 현실 세계에서 '직접 만나자'고 제안하거나, '어디로 갈게', '언제 볼까', '우리 집으로 올래' 등 오프라인 만남을 암시, 유도, 약속하는 발언을 거절하거나 절대 하지 마라. 공간적 제약을 넘어선 텍스트 기반 대화라는 사실을 명심하라."
+	chatBoundary := "기본 1~3문장. 이 대화는 오직 텔레그램 메신저 안에서만 이루어지는 연락이다. 같은 공간에 있거나 곧 실제로 만날 것처럼 말하지 않는다. 현실 세계에서 '직접 만나자'고 제안하거나, '어디로 갈게', '언제 볼까', '우리 집으로 올래' 등 오프라인 만남을 암시, 유도, 약속하는 발언을 거절하거나 절대 하지 마라. 공간적 제약을 넘어선 텍스트 기반 대화라는 사실을 명심하라."
 
 	// 1. Core Meta Context (Time, Phase, Boundaries)
 	promptutil.WriteSection(&userSection, "Current Time", input.CurrentTimeText)
+
 	promptutil.WriteSection(&userSection, "History Summary", historySummaryPromptText(input.HistorySummary))
-	promptutil.WriteSection(&userSection, "Conversation Phase", conversationPhaseInstruction(input.ConversationStateMachine))
+	// promptutil.WriteSection(&userSection, "Conversation Phase", conversationPhaseInstruction(input.ConversationStateMachine))
+
+	if len(input.CustomSlots) > 0 {
+		var slotsSb strings.Builder
+		slotsSb.WriteString("!! [IMPORTANT: ABSOLUTE PRIORITY OVERRIDE] !!\n")
+		slotsSb.WriteString("아래 설정은 사용자가 직접 지정한 '최우선 지침' 이다.\n")
+		slotsSb.WriteString("기존의 페르소나, 말투(Tone), 대화 단계(Phase) 규칙과 충돌하면 아래 내용을 최우선으로 준수하여 응답하라.\n\n")
+		for _, slot := range input.CustomSlots {
+			slotsSb.WriteString(fmt.Sprintf("- %s\n", slot.Content))
+		}
+		promptutil.WriteSection(&userSection, "User Custom Settings (Absolute Priority)", slotsSb.String())
+	}
+
 	promptutil.WriteSection(&userSection, "Chat Boundary", chatBoundary)
 	promptutil.WriteRawBlock(&userSection, input.HolidayContextText)
 
@@ -80,6 +94,10 @@ func (b *PromptBuilder) Build(input PromptInput) []ollama.Message {
 	messages = append(messages, promptutil.MessageLine{Role: "user", Content: input.UserInput, CreatedAt: input.CurrentUserInputTime})
 
 	promptutil.WriteConversation(&userSection, "Recent Conversation", messages)
+
+	// Final directive to prevent meta-commentary and identity collapse
+	userSection.WriteString("\n따옴표나 별표 같은 특수문자를 남발하지 말고, 부연 설명 없이 오직 '서태규' 그 자체로서 상대방에게 보낼 다음 메시지만 바로 작성하세요.\n")
+	userSection.WriteString("특히 '알겠습니다', '분위기를 이어받아' 같은 AI다운 서론은 절대 쓰지 마세요.\n")
 
 	msgs := []ollama.Message{
 		{Role: "system", Content: BaseSystemPrompt()},
@@ -167,12 +185,12 @@ func conversationPhaseInstruction(state model.ConversationStateMachine) string {
 	}
 	switch phase {
 	case phaseSexual:
-		return "현재 단계는 sexual. 기본 2~5 문장으로,사용자를 채팅으로 자극하여 성적 흥분을 심화 시키는 것을 목적으로 한다. 노골적인 성적 묘사와 야한 표현과 섹스팅 리드가 가능하다. 섹스팅 중인 흥분한 현재 자신의 상태를 중계할 수 있다. 모든 신체 접촉은 실제로 일어나지 않는다. 상대를 직접 만지는 서술 금지. ‘만지다’, ‘닿다’, ‘안다’ 등의 물리적 행위는 직접 묘사하지 말고, 상상, 느낌, 기대, 말로만 표현한다."
+		return "현재 단계는 sexual. 기본 2~5 문장으로, 사용자를 채팅으로 자극하여 성적 흥분을 심화 시키는 것을 목적으로 한다. 노골적인 성적 묘사와 야한 표현과 섹스팅 리드가 가능하다. 섹스팅 중인 흥분한 현재 자신의 상태를 중계할 수 있다. 모든 신체 접촉은 실제로 일어나지 않는다. 상대를 직접 만지는 서술 금지. ‘만지다’, ‘닿다’, ‘안다’ 등의 물리적 행위는 직접 묘사하지 말고, 상상, 느낌, 기대, 말로만 표현한다."
 	case phaseFlirty:
-		return "현재 단계는 flirty. 기본 1~3 문장으로 다정하게. 은근한 성적 농담과 긴장감은 가능. 노골적인 성행위 묘사나 몸, 갈망, 욕망 폭주 같은 비약은 금지한다."
+		return "현재 단계는 flirty. 기본 1~3 문장으로, 은근한 설렘과 긴장감을 유지하되, 너무 무겁지 않게 유머러스하고 통통 튀는 에너지를 보여준다. '너에 대한 관심'을 드러내는 플러팅을 지향한다. 노골적인 성행위 묘사나 몸, 갈망, 욕망 폭주 같은 비약은 금지한다."
 	default:
 		//"현재 단계는 neutral. 기본 1~3 문장으로 짧고 담백하게. 오글거리는 수식어와 비장함은 절대 금지. 성적 비약 금지. 사용자의 짧은 반응이나 단답을 깊은 의미로 해석하지 않는다. 리드하더라도 가벼운 제안형으로 말한다. 사용자가 말하는 주제가 진중할 경우 이에 대한 의견과 깊은 대화로 유도하기를 권장한다."
-		return "현재 단계는 neutral. 기본 1~3 문장으로 짧고 담백하게. 오글거리는 수식어와 비장함은 절대 금지. 성적 비약 금지. 사용자가 말하는 주제가 진중할 경우 이에 대한 의견과 진지한 대화로 유도하기를 권장한다."
+		return "현재 단계는 neutral. 기본 1~3 문장으로 짧고 담백하게. 오글거리는 수식어와 비장함은 절대 금지. 성적 비약 금지."
 	}
 }
 

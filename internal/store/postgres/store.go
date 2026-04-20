@@ -418,6 +418,18 @@ CREATE TABLE IF NOT EXISTS tg_conversation_state_machine (
 
 CREATE INDEX IF NOT EXISTS idx_tg_conversation_state_machine_message
     ON tg_conversation_state_machine (last_source_message_id ASC);
+
+CREATE TABLE IF NOT EXISTS tg_session_custom_slots (
+    id BIGSERIAL PRIMARY KEY,
+    session_id BIGINT NOT NULL REFERENCES tg_chat_sessions(id) ON DELETE CASCADE,
+    slot_index INT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (session_id, slot_index)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tg_session_custom_slots_session
+    ON tg_session_custom_slots (session_id ASC, slot_index ASC);
 `
 
 	_, err := s.pool.Exec(ctx, schema)

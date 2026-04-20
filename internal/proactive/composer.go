@@ -8,6 +8,7 @@ import (
 
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/chat"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/holiday"
+	"github.com/hsvtr365/telegram_romance_AI_bot/internal/store/model"
 )
 
 type ComposeInput struct {
@@ -20,6 +21,7 @@ type ComposeInput struct {
 	MemorySummary    string
 	RelationshipNote string
 	EventNote        string
+	CustomSlots      []model.CustomSlot
 }
 
 type ComposeResult struct {
@@ -104,6 +106,7 @@ func (c *Composer) Compose(ctx context.Context, input ComposeInput) (ComposeResu
 		EventNote:          input.EventNote,
 		HolidayContextText: holidayText,
 		RecentConversation: input.RecentMessages,
+		CustomSlots:        input.CustomSlots,
 	})
 
 	reply, err := llm.Chat(ctx, promptMessages)

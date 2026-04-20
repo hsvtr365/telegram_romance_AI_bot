@@ -252,7 +252,7 @@ func (s *Service) HandleUpdate(ctx context.Context, update telegram.Update) erro
 
 			s.applyFastConversationState(ctx, &conversation, input, userTurnCount, sourceMessageID)
 			s.enqueueAsyncStateReview(chatID, &conversation, input, userTurnCount, sourceMessageID)
-			s.enqueueProfileBatchReview(&conversation, userTurnCount, sourceMessageID)
+			s.enqueueProfileBatchReview(&conversation, userTurnCount, sourceMessageID, false)
 
 			if userTurnCount > 0 && detectProfilePromptDiscomfort(input) {
 				pauseUntil := userTurnCount + profilePromptTurnCooldown
@@ -330,7 +330,7 @@ generateLoop:
 		}
 
 		memorySections := BuildMemoryPromptSectionsFromStateMachine(topicsForPrompt, stateForAttempt)
-		reply, err := s.generateReply(genCtx, now, messageTimestamp(*update.Message), input, conversation.RecentConversation, conversation.UserProfile, conversation.ProfileCandidates, conversation.UserTraits, stateForAttempt, profilePrompt, holidayContext, userTurnCount, memorySections, conversation.Session.HistorySummary)
+		reply, err := s.generateReply(genCtx, now, messageTimestamp(*update.Message), input, conversation.RecentConversation, conversation.UserProfile, conversation.ProfileCandidates, conversation.UserTraits, stateForAttempt, profilePrompt, holidayContext, userTurnCount, memorySections, conversation.Session.HistorySummary, conversation.CustomSlots)
 		promptGenerated = err == nil
 		if err != nil {
 			reason := s.generationCoordinator.InterruptReason(chatID, handle.GenerationID)
@@ -470,10 +470,22 @@ func (s *Service) handleCommand(ctx context.Context, update telegram.Update, inp
 		return true, s.handleResetCommand(ctx, update)
 	case "!내정보", "!info", "/내정보", "/info":
 		return true, s.handleMyInfoCommand(ctx, update)
+	case "!내정보추가", "!내정보변경", "!내정보수정", "/내정보추가", "/내정보변경", "/내정보수정":
+		return true, s.handleUpdateMyInfoCommand(ctx, update, input)
 	case "!대화내용", "!context", "/대화내용", "/context":
 		return true, s.handleConversationContentCommand(ctx, update)
-	case "!cleartraits", "/cleartraits":
+	case "!취향초기화", "/취향초기화":
 		return true, s.handleClearTraitsCommand(ctx, update)
+	case "!상태", "/상태":
+		return true, s.handleStatusCommand(ctx, update)
+	case "!내정보수집", "!정보수집", "/내정보수집", "/정보수집":
+		return true, s.handleInfoCollectionCommand(ctx, update)
+	case "!추가슬롯", "/추가슬롯":
+		return true, s.handleAddCustomSlotCommand(ctx, update, input)
+	case "!추가슬롯삭제", "/추가슬롯삭제":
+		return true, s.handleDeleteCustomSlotCommand(ctx, update, input)
+	case "!추가슬롯조회", "/추가슬롯조회":
+		return true, s.handleListCustomSlotsCommand(ctx, update)
 	case "!도움말", "/help", "!help", "/도움말":
 		return true, s.bot.SendMessage(ctx, update.Message.Chat.ID, helpText())
 	default:
@@ -613,6 +625,96 @@ func (s *Service) handleMyInfoCommand(ctx context.Context, update telegram.Updat
 	return s.bot.SendMessage(ctx, update.Message.Chat.ID, sb.String())
 }
 
+func (s *Service) handleStatusCommand(ctx context.Context, update telegram.Update) error {
+	if s.store == nil || update.Message == nil {
+		return nil
+	}
+
+	conversation, err := s.store.BootstrapContext(ctx, *update.Message, DefaultSessionMode, s.cfg.RecentTurnLimit)
+	if err != nil {
+		return s.bot.SendMessage(ctx, update.Message.Chat.ID, "상태 정보를 불러오는 데 실패했어.")
+	}
+
+	// Fetch additional memory slots not in BootstrapContext
+	state, _ := s.store.GetConversationStateMachine(ctx, conversation.Session.ID)
+
+	var sb strings.Builder
+	sb.WriteString("⚙️ *[시스템 및 대화 상태]*\n")
+	sb.WriteString(fmt.Sprintf("• 세션 ID: `%d`\n", conversation.Session.ID))
+	sb.WriteString(fmt.Sprintf("• 현재 유저 대화 횟수: %d회\n", conversation.UserTurnCount))
+	sb.WriteString(fmt.Sprintf("• 최근 대화 유지: %d턴\n", s.cfg.RecentTurnLimit))
+
+	mode := conversation.Session.Mode
+	if mode == "" {
+		mode = DefaultSessionMode
+	}
+	sb.WriteString(fmt.Sprintf("• 현재 모드: `%s`\n", mode))
+	sb.WriteString(fmt.Sprintf("• 선톡(Proactive): %s\n", renderEnabled(conversation.Session.ProactiveOptIn)))
+
+	sb.WriteString("\n🛠 *[활성화된 기능]*\n")
+	sb.WriteString(fmt.Sprintf("• 유저 정보 추출: %s\n", renderEnabled(s.cfg.StructuredExtractEnabled)))
+	sb.WriteString(fmt.Sprintf("• 대화 주제 저장: %s\n", renderEnabled(s.cfg.MemorySlotEnabled)))
+	sb.WriteString(fmt.Sprintf("• 실시간 상태 분석: %s\n", renderEnabled(s.cfg.StateReviewEnabled)))
+
+	state = normalizeConversationStateMachine(state)
+	sb.WriteString("\n🧠 *[AI 내부 상태]*\n")
+	if state.InteractionMode != "" {
+		sb.WriteString(fmt.Sprintf("• 상호작용 방식: %s\n", state.InteractionMode))
+	}
+	if state.EmotionalTone != "" {
+		sb.WriteString(fmt.Sprintf("• 감정 톤: %s\n", state.EmotionalTone))
+	}
+	sb.WriteString(fmt.Sprintf("• 대화 단계(Phase): %s\n", renderPhase(state.TonePhase)))
+	sb.WriteString(fmt.Sprintf("• 관계 단계(Stage): %s\n", state.RelationalStage))
+
+	if state.SafetyLockUntilTurn > conversation.UserTurnCount {
+		sb.WriteString(fmt.Sprintf("• 세이프티 락 (활성): %d턴까지\n", state.SafetyLockUntilTurn))
+	}
+
+	if conversation.UserProfile.CollectionPausedUntilTurn > conversation.UserTurnCount {
+		sb.WriteString(fmt.Sprintf("\n⏳ *[수집 일시정지]*\n• 프로필 수집 중단: %d턴까지\n", conversation.UserProfile.CollectionPausedUntilTurn))
+	}
+
+	return s.bot.SendMessage(ctx, update.Message.Chat.ID, sb.String())
+}
+
+func (s *Service) handleInfoCollectionCommand(ctx context.Context, update telegram.Update) error {
+	conversation, err := s.store.BootstrapContext(ctx, *update.Message, DefaultSessionMode, s.cfg.RecentTurnLimit)
+	if err != nil {
+		return s.bot.SendMessage(ctx, update.Message.Chat.ID, "세션 정보를 불러오는 데 실패했어.")
+	}
+
+	// 1. Force History Summary
+	s.updateHistorySummaryAsync(conversation.Session.ID, s.cfg.RecentTurnLimit)
+
+	// 2. Force Profile Batch Review
+	s.enqueueProfileBatchReview(&conversation, conversation.UserTurnCount, 0, true)
+
+	return s.bot.SendMessage(ctx, update.Message.Chat.ID, "⚙️ 정보 수집(히스토리 요약 및 프로필 검토)을 백그라운드에서 즉시 시작했어. 잠시 후에 `!내정보`나 `!상태`를 확인해봐!")
+}
+
+func renderEnabled(enabled bool) string {
+	if enabled {
+		return "✅ ON"
+	}
+	return "❌ OFF"
+}
+
+func renderPhase(phase string) string {
+	switch phase {
+	case phaseNeutral:
+		return "노말(Normal)"
+	case phaseFlirty:
+		return "플러팅(Flirty)"
+	case phaseSexual:
+		return "섹슈얼(Sexual)"
+	default:
+		return phase
+	}
+}
+
+
+
 func (s *Service) handleConversationContentCommand(ctx context.Context, update telegram.Update) error {
 	if s.store == nil || update.Message == nil {
 		return nil
@@ -698,14 +800,21 @@ func helpText() string {
 	sb.WriteString("📍 *설정 및 관리*\n")
 	sb.WriteString("• `/start`: 대화 시작 및 환영 인사\n")
 	sb.WriteString("• `/리셋` 또는 `/reset`: 지금까지의 대화 내용 초기화\n")
-	sb.WriteString("• `/선톡켜` | `/선톡꺼`: 선톡(Proactive Message) 활성화/비활성화\n\n")
+	sb.WriteString("• `/선톡켜` | `/선톡꺼`: 선톡(Proactive Message) 활성화/비활성화\n")
+	sb.WriteString("• `!내정보변경 [항목] [내용]`: 내 프로필 항목 직접 수정\n")
+	sb.WriteString("• `!추가슬롯 [내용]`: AI 프롬프트에 강제 지침/설정 추가\n")
+	sb.WriteString("• `!추가슬롯삭제 [번호]`: 저장된 강제 설정 삭제\n\n")
 
-	sb.WriteString("🔍 *데이터 확인 (개발용)*\n")
+	sb.WriteString("🔍 *데이터 확인 및 제어*\n")
 	sb.WriteString("• `!내정보`: AI가 파악한 내 프로필 및 특징 확인\n")
-	sb.WriteString("• `!대화내용`: 현재 대화의 맥락 분석 결과 및 저장된 주제 목록 확인\n")
+	sb.WriteString("• `!대화내용`: 현재 대화의 맥락 및 저장된 주제 목록 확인\n")
+	sb.WriteString("• `!상태`: 봇의 세션 모드 및 내부 상태(Phase) 확인\n")
+	sb.WriteString("• `!추가슬롯조회`: 저장된 모든 강제 설정 확인\n")
+	sb.WriteString("• `!내정보수집`: 히스토리 요약 및 정보 분석 즉시 실행\n")
+	sb.WriteString("• `!취향초기화`: 잘못 수집된 유저 특징 데이터 초기화\n")
 	sb.WriteString("• `!도움말`: 명령어 목록 보기\n\n")
 
-	sb.WriteString("기타 궁금한 점은 그냥 편하게 대화로 물어봐줘!")
+	sb.WriteString("💡 *팁*: `!내정보변경 이름 김수지` 처럼 사용해봐!")
 	return sb.String()
 }
 
@@ -757,7 +866,7 @@ func leftPadTwo(value int) string {
 	return strconv.Itoa(value)
 }
 
-func (s *Service) generateReply(ctx context.Context, now time.Time, currentInputAt time.Time, input string, recentConversation []model.Message, userProfile model.UserProfile, profileCandidates []model.ProfileCandidate, userTraits []model.UserTrait, stateMachine model.ConversationStateMachine, profilePrompt profilePromptContext, holidayContext string, userTurnCount int, memorySections MemoryPromptSections, historySummary string) (string, error) {
+func (s *Service) generateReply(ctx context.Context, now time.Time, currentInputAt time.Time, input string, recentConversation []model.Message, userProfile model.UserProfile, profileCandidates []model.ProfileCandidate, userTraits []model.UserTrait, stateMachine model.ConversationStateMachine, profilePrompt profilePromptContext, holidayContext string, userTurnCount int, memorySections MemoryPromptSections, historySummary string, customSlots []model.CustomSlot) (string, error) {
 	messages := s.prompt.Build(PromptInput{
 		UserInput:                input,
 		RecentConversation:       recentConversation,
@@ -775,6 +884,7 @@ func (s *Service) generateReply(ctx context.Context, now time.Time, currentInput
 		ConversationStateText:    memorySections.ConversationStateText,
 		OpenLoopsText:            memorySections.OpenLoopsText,
 		MemorySummary:            memorySections.MemorySummary,
+		CustomSlots:              customSlots,
 	})
 
 	reply, err := s.llm.Chat(ctx, messages)
@@ -811,14 +921,24 @@ func (s *Service) applyFastConversationState(ctx context.Context, conversation *
 
 	next := current
 	changed := false
+	if next.TonePhase == phaseSexual {
+		next.TonePhase = phaseFlirty
+		changed = true
+	}
 	if current.SafetyLockUntilTurn > 0 && userTurnCount < current.SafetyLockUntilTurn && current.TonePhase != phaseNeutral {
 		next.TonePhase = phaseNeutral
 		changed = true
 	}
 
 	if signal := result.Signal; signal.NextPhase != "" && signal.NextPhase != next.TonePhase {
-		next.TonePhase = signal.NextPhase
-		changed = true
+		nextPhase := signal.NextPhase
+		if nextPhase == phaseSexual {
+			nextPhase = phaseFlirty
+		}
+		if nextPhase != next.TonePhase {
+			next.TonePhase = nextPhase
+			changed = true
+		}
 	}
 	if signal := result.Signal; signal.PauseSexualTurns > 0 {
 		untilTurn := userTurnCount + signal.PauseSexualTurns
@@ -997,8 +1117,14 @@ func applyAsyncStateReviewResult(current model.ConversationStateMachine, topicSl
 	}
 
 	if confident && review.TonePhase != "" && review.TonePhase != "unchanged" && review.TonePhase != next.TonePhase {
-		next.TonePhase = review.TonePhase
-		changed = true
+		nextPhase := review.TonePhase
+		if nextPhase == phaseSexual {
+			nextPhase = phaseFlirty
+		}
+		if nextPhase != next.TonePhase {
+			next.TonePhase = nextPhase
+			changed = true
+		}
 	}
 	if confident && review.RelationalStage != "" && review.RelationalStage != "unchanged" && review.RelationalStage != next.RelationalStage {
 		next.RelationalStage = review.RelationalStage

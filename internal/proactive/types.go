@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/ollama"
+	"github.com/hsvtr365/telegram_romance_AI_bot/internal/store/model"
 )
 
 type TriggerType string
@@ -266,6 +267,7 @@ type Repository interface {
 	ListRecentMessages(ctx context.Context, sessionID int64, limit int) ([]ConversationMessage, error)
 	ListRecentProactiveMessages(ctx context.Context, sessionID int64, limit int) ([]ProactiveMessageRecord, error)
 	GetMemorySummary(ctx context.Context, sessionID int64, recentTurnLimit int) (string, error)
+	ListSessionCustomSlots(ctx context.Context, sessionID int64) ([]model.CustomSlot, error)
 	GetProactiveProfile(ctx context.Context, userID int64) (ProactiveProfile, error)
 	InsertProactiveMessage(ctx context.Context, record ProactiveMessageRecord) (int64, error)
 	UpdateProactiveMessage(ctx context.Context, record ProactiveMessageRecord) error

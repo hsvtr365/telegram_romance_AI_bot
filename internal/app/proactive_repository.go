@@ -8,6 +8,7 @@ import (
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/proactive"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/store"
 	pgstore "github.com/hsvtr365/telegram_romance_AI_bot/internal/store/postgres"
+	"github.com/hsvtr365/telegram_romance_AI_bot/internal/store/model"
 )
 
 type proactiveRepository struct {
@@ -91,6 +92,10 @@ func (r *proactiveRepository) GetMemorySummary(ctx context.Context, sessionID in
 	}
 
 	return chat.BuildMemorySummaryFromStateMachine(snapshot.TopicSlots, snapshot.ConversationStateMachine), nil
+}
+ 
+func (r *proactiveRepository) ListSessionCustomSlots(ctx context.Context, sessionID int64) ([]model.CustomSlot, error) {
+	return r.store.ListSessionCustomSlots(ctx, sessionID)
 }
 
 func (r *proactiveRepository) GetProactiveProfile(ctx context.Context, userID int64) (proactive.ProactiveProfile, error) {

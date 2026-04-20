@@ -183,6 +183,29 @@ func profileSlotLabel(slot string) string {
 	}
 }
 
+func parseProfileSlotLabel(label string) string {
+	switch strings.TrimSpace(label) {
+	case "이름", "name":
+		return profileSlotName
+	case "성별", "gender":
+		return profileSlotGender
+	case "나이", "age":
+		return profileSlotAge
+	case "직업", "job":
+		return profileSlotJob
+	case "거주지", "location":
+		return profileSlotLocation
+	case "소속", "affiliation":
+		return profileSlotAffiliation
+	case "취미", "hobby":
+		return profileSlotHobby
+	case "현재 관심사", "관심사", "current_focus", "focus":
+		return profileSlotCurrentFocus
+	default:
+		return ""
+	}
+}
+
 func confirmedProfileValueBySlot(profile model.UserProfile, slot string) string {
 	switch slot {
 	case profileSlotName:

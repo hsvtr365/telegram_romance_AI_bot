@@ -153,8 +153,10 @@ func normalizeAsyncTonePhase(value string) string {
 	switch value {
 	case "", "unchanged":
 		return "unchanged"
-	case phaseNeutral, phaseFlirty, phaseSexual:
+	case phaseNeutral, phaseFlirty:
 		return value
+	case phaseSexual:
+		return phaseFlirty // Redirect sexual to flirty
 	default:
 		return "unchanged"
 	}

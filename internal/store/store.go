@@ -29,6 +29,7 @@ type ConversationContext struct {
 	Session                  model.Session
 	RecentConversation       []model.Message
 	UserTurnCount            int
+	CustomSlots              []model.CustomSlot
 }
 
 type Manager struct {
@@ -101,13 +102,15 @@ func (m *Manager) BootstrapContext(ctx context.Context, message telegram.Message
 		return ConversationContext{}, err
 	}
 
-	errChan := make(chan error, 6)
 	var recentConversation []model.Message
 	var userProfile model.UserProfile
 	var profileCandidates []model.ProfileCandidate
 	var userTraits []model.UserTrait
 	var conversationStateMachine model.ConversationStateMachine
 	var userTurnCount int
+	var customSlots []model.CustomSlot
+
+	errChan := make(chan error, 7)
 
 	go func() {
 		var err error
@@ -145,7 +148,13 @@ func (m *Manager) BootstrapContext(ctx context.Context, message telegram.Message
 		errChan <- err
 	}()
 
-	for i := 0; i < 6; i++ {
+	go func() {
+		var err error
+		customSlots, err = m.postgres.ListSessionCustomSlots(ctx, session.ID)
+		errChan <- err
+	}()
+
+	for i := 0; i < 7; i++ {
 		if fetchErr := <-errChan; fetchErr != nil && err == nil {
 			err = fetchErr
 		}
@@ -163,6 +172,7 @@ func (m *Manager) BootstrapContext(ctx context.Context, message telegram.Message
 		Session:                  session,
 		RecentConversation:       recentConversation,
 		UserTurnCount:            userTurnCount,
+		CustomSlots:              customSlots,
 	}, nil
 }
 

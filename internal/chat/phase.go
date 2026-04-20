@@ -21,5 +21,9 @@ func detectConversationPhaseSignal(input string, currentPhase string) phaseSigna
 	if defaultPhaseDetector == nil {
 		return phaseSignal{}
 	}
-	return defaultPhaseDetector.Detect(input, currentPhase)
+	sig := defaultPhaseDetector.Detect(input, currentPhase)
+	if sig.NextPhase == phaseSexual {
+		sig.NextPhase = phaseFlirty // Redirect sexual to flirty
+	}
+	return sig
 }

@@ -11,7 +11,7 @@
 - session snapshot: mode, recent turn limit, conversation phase
 - conversation context: timestamped recent conversation, profile, traits
 - memory context: topic slots with temporal metadata, conversation state, stale-aware history summary, memory summary
-- extra context: holiday, event, proactive candidate
+- extra context: holiday, event, proactive candidate, custom slots (user-defined rules/settings)
 
 ### `HarnessStage`
 - `normalize`

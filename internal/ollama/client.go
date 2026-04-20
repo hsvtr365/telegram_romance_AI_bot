@@ -49,6 +49,10 @@ func NewClient(cfg Config, logger *slog.Logger) *Client {
 }
 
 func (c *Client) Chat(ctx context.Context, messages []Message) (string, error) {
+	if c.usesOpenAICompat() {
+		return c.chatOpenAICompat(ctx, messages)
+	}
+
 	reqBody := ChatRequest{
 		Model:     c.model,
 		Messages:  messages,
@@ -96,7 +100,15 @@ func (c *Client) Chat(ctx context.Context, messages []Message) (string, error) {
 }
 
 func (c *Client) CheckHealth(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/tags", nil)
+	path := "/api/tags"
+	providerLabel := "ollama"
+	if c.usesOpenAICompat() {
+		path = "/models"
+		providerLabel = "openai-compatible"
+	}
+
+	url := c.endpointURL(path)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
 	}
@@ -113,10 +125,66 @@ func (c *Client) CheckHealth(ctx context.Context) error {
 	}
 
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("ollama health returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return fmt.Errorf("%s health returned %d: %s", providerLabel, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	return nil
+}
+
+func (c *Client) chatOpenAICompat(ctx context.Context, messages []Message) (string, error) {
+	reqBody := OpenAIChatRequest{
+		Model:       c.model,
+		Messages:    messages,
+		Temperature: c.temperature,
+		TopP:        c.topP,
+		Stream:      false,
+	}
+
+	payload, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpointURL("/chat/completions"), bytes.NewReader(payload))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	if resp.StatusCode >= 400 {
+		return "", fmt.Errorf("openai-compatible returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var response OpenAIChatResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		return "", fmt.Errorf("decode openai-compatible response: %w", err)
+	}
+	if len(response.Choices) == 0 {
+		return "", fmt.Errorf("openai-compatible response missing choices")
+	}
+
+	return strings.TrimSpace(response.Choices[0].Message.Content), nil
+}
+
+func (c *Client) usesOpenAICompat() bool {
+	return strings.Contains(strings.ToLower(strings.TrimSpace(c.baseURL)), "/v1")
+}
+
+func (c *Client) endpointURL(path string) string {
+	base := strings.TrimRight(strings.TrimSpace(c.baseURL), "/")
+	path = "/" + strings.TrimLeft(strings.TrimSpace(path), "/")
+	return base + path
 }
 
 func normalizeTimeout(timeoutSec int) time.Duration {

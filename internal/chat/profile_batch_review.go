@@ -236,11 +236,11 @@ func buildBatchReviewWindowSummary(messages []model.Message) string {
 	return strings.Join(lines, "\n")
 }
 
-func (s *Service) enqueueProfileBatchReview(conversation *store.ConversationContext, userTurnCount int, sourceMessageID int64) {
+func (s *Service) enqueueProfileBatchReview(conversation *store.ConversationContext, userTurnCount int, sourceMessageID int64, force bool) {
 	if s == nil || s.store == nil || s.profileBatchReviewer == nil || s.analyticRunner == nil || conversation == nil {
 		return
 	}
-	if conversation.User.ID == 0 || conversation.Session.ID == 0 || userTurnCount == 0 || userTurnCount%profileBatchReviewInterval != 0 {
+	if !force && (conversation.User.ID == 0 || conversation.Session.ID == 0 || userTurnCount == 0 || userTurnCount%profileBatchReviewInterval != 0) {
 		return
 	}
 

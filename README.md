@@ -1,7 +1,7 @@
 # telegram_romance_AI_bot
 
 텔레그램에서 1:1로 대화하는 가상연애 챗봇 프로젝트다.  
-현재 구현은 `Go long polling bot + Ollama + health check HTTP server` 구조로 시작한다.
+현재 구현은 `Go long polling bot + Ollama/OpenAI-compatible LLM + health check HTTP server` 구조로 시작한다.
 
 ## 용도
 
@@ -15,7 +15,7 @@
 - `/start`, `/ping` 명령 처리
 - `/reset`, `/리셋` 명령으로 대화 기록 초기화
 - `/proactive_on`, `/선톡켜`, `/proactive_off`, `/선톡꺼` 명령 처리
-- 일반 텍스트 메시지를 Ollama `/api/chat`으로 전달
+- 일반 텍스트 메시지를 Ollama `/api/chat` 또는 OpenAI-compatible `/v1/chat/completions`으로 전달
 - Postgres에 사용자/세션/메시지 저장
 - Redis에 최근 대화 14턴 캐시
 - 선톡 opt-in, 이벤트 힌트 저장, 조건 기반 선톡 worker
@@ -114,6 +114,62 @@ curl https://gitlab.swempire.co.kr/ollama/api/tags
 서버마다 모델명이 다를 수 있으면 `OLLAMA_ENDPOINT_01_BASE_URL`, `OLLAMA_ENDPOINT_01_MODEL`처럼 순번별로 짝을 맞춰 넣으면 된다.
 봇은 번호가 작은 endpoint부터 healthy한 서버를 우선 사용하고, 연결 실패나 5xx가 나면 다음 서버로 즉시 넘어간다.
 또한 `OLLAMA_HEALTHCHECK_INTERVAL_SEC` 주기로 unhealthy 서버의 `/api/tags`를 다시 확인해서 살아나면 원래 우선순위대로 복귀한다.
+
+`http://.../v1` 형태의 base URL을 넣으면 OpenAI-compatible endpoint로 자동 인식해서 `/v1/chat/completions`와 `/v1/models`를 사용한다. 그래서 메인 모델 endpoint도 `Ollama`뿐 아니라 `mlx_lm.server`로 둘 수 있다.
+
+## MLX 메인 모델 붙이기
+
+`supergemma4-26b-mlx`를 메인 endpoint 풀의 2순위로 넣고, 전체 순서를 `원격 서버 -> 로컬 MLX -> 로컬 Ollama`로 두려면:
+
+1. MLX 서버를 띄운다.
+
+```bash
+cd /Users/suji/models/supergemma4-26b-mlx
+./run_server.sh
+```
+
+2. `.env`에 아래 값을 넣는다.
+
+```env
+OLLAMA_ENDPOINT_01_BASE_URL=https://gitlab.swempire.co.kr/ollama
+OLLAMA_ENDPOINT_01_MODEL=gemma4-heretic:q4km
+OLLAMA_ENDPOINT_02_BASE_URL=http://127.0.0.1:18123/v1
+OLLAMA_ENDPOINT_02_MODEL=/Users/suji/models/supergemma4-26b-mlx
+OLLAMA_ENDPOINT_03_BASE_URL=http://127.0.0.1:11434
+OLLAMA_ENDPOINT_03_MODEL=gemma4-26b-heretic-q4km:latest
+OLLAMA_BASE_URL=https://gitlab.swempire.co.kr/ollama
+OLLAMA_MODEL=gemma4-heretic:q4km
+```
+
+이렇게 하면 메인 대화는 먼저 원격 Ollama 서버를 시도하고, 실패하면 로컬 MLX, 그것도 실패하면 로컬 Ollama로 넘어간다. 즉 메인 모델 풀에 `Ollama`와 `MLX`를 섞어서 순서대로 failover 시킬 수 있다.
+
+## Ollama run 같은 대화형 사용
+
+`mlx-lm`은 `ollama run`과 완전히 같은 CLI는 아니지만 비슷하게 쓸 수 있다.
+
+간단한 1회성 대화:
+
+```bash
+cd /Users/suji/models/supergemma4-26b-mlx
+./run_generate.sh "오늘 기분 좋은 톤으로 인사해줘."
+```
+
+반복 대화형 REPL:
+
+```bash
+source /Users/suji/models/supergemma4-26b-mlx/.venv/bin/activate
+mlx_lm.chat --model /Users/suji/models/supergemma4-26b-mlx
+```
+
+OpenAI-compatible 서버를 띄워두고 외부 클라이언트에서 채팅:
+
+```bash
+cd /Users/suji/models/supergemma4-26b-mlx
+./run_server.sh
+./test_chat.sh "안녕?"
+```
+
+REPL인 `mlx_lm.chat`은 `ollama run`과 가장 비슷한 사용감이고, 서버 방식은 P2 같은 외부 앱에 붙이기 좋다.
 
 ## 로컬에서 실행하는 법
 

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/holiday"
+	"github.com/hsvtr365/telegram_romance_AI_bot/internal/store/model"
 	"github.com/hsvtr365/telegram_romance_AI_bot/pkg/logx"
 )
 
@@ -190,6 +191,7 @@ func (s *Scheduler) handleScannedCandidate(ctx context.Context, item ScannedCand
 	composeResult, ok := preparedReminderComposeResult(item.Event)
 	if !ok {
 		memorySummary := ""
+		var customSlots []model.CustomSlot
 		if s.repo != nil {
 			summary, err := s.repo.GetMemorySummary(ctx, item.Session.SessionID, item.Session.RecentTurnLimit)
 			if err != nil {
@@ -198,6 +200,15 @@ func (s *Scheduler) handleScannedCandidate(ctx context.Context, item ScannedCand
 				}
 			} else {
 				memorySummary = summary
+			}
+
+			slots, err := s.repo.ListSessionCustomSlots(ctx, item.Session.SessionID)
+			if err != nil {
+				if s.logger != nil {
+					s.logger.Warn("failed to load proactive session custom slots", "session_id", item.Session.SessionID, "error", err)
+				}
+			} else {
+				customSlots = slots
 			}
 		}
 
@@ -211,6 +222,7 @@ func (s *Scheduler) handleScannedCandidate(ctx context.Context, item ScannedCand
 			RecentProactives: item.RecentProactives,
 			MemorySummary:    memorySummary,
 			EventNote:        eventNote(item.Event),
+			CustomSlots:      customSlots,
 		})
 		if err != nil {
 			return err

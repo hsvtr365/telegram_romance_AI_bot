@@ -12,14 +12,6 @@ func PostProcess(text string, _ int) string {
 	text = strings.TrimPrefix(text, "Assistant:")
 	text = strings.TrimSpace(text)
 
-	replacer := strings.NewReplacer(
-		"AI로서", "",
-		"정리하자면", "",
-		"설명하자면", "",
-		"다음과 같다", "",
-	)
-	text = strings.TrimSpace(replacer.Replace(text))
-
 	lines := strings.Split(text, "\n")
 	cleaned := make([]string, 0, len(lines))
 	var prev string
@@ -28,17 +20,67 @@ func PostProcess(text string, _ int) string {
 		if line == "" {
 			continue
 		}
+		if isMetaLine(line) {
+			continue
+		}
 		if line == prev {
 			continue
 		}
+		
+		// Strip common role markers at the start of the line
+		line = strings.TrimPrefix(line, "**AI:**")
+		line = strings.TrimPrefix(line, "**서태규:**")
+		line = strings.TrimPrefix(line, "서태규:")
+		line = strings.TrimSpace(line)
+		
+		if line == "" {
+			continue
+		}
+
 		cleaned = append(cleaned, line)
 		prev = line
 	}
 
-	text = strings.Join(cleaned, "\n")
-
-	return strings.TrimSpace(text)
+	return strings.TrimSpace(strings.Join(cleaned, "\n"))
 }
+
+func isMetaLine(line string) bool {
+	lower := strings.ToLower(line)
+	
+	// Check for AI completion headers/markers
+	if strings.Contains(line, "**AI:**") || strings.Contains(line, "**Assistant:**") {
+		// If it's just the marker or has meta text, skip the whole line.
+		if len([]rune(line)) < 15 || containsAny(lower, "이어받아", "작성해", "제시해") {
+			return true
+		}
+	}
+
+	metaPhrases := []string{
+		"제시해주신 대화",
+		"분위기를 이어받아",
+		"분위기를 반영",
+		"페르소나를 유지",
+		"말투를 유지",
+		"작성해 드립니다",
+		"작성하겠습니다",
+	}
+
+	for _, phrase := range metaPhrases {
+		if strings.Contains(lower, strings.ToLower(phrase)) {
+			return true
+		}
+	}
+
+	// Only skip "알겠습니다" if it sounds like an AI confirmation
+	if strings.HasPrefix(line, "알겠습니다") {
+		if strings.Contains(line, "지침") || strings.Contains(line, "요청") || strings.Contains(line, "반영") || len([]rune(line)) > 30 {
+			return true
+		}
+	}
+
+	return false
+}
+
 
 func sanitizeFreshConversationReply(text string) string {
 	text = strings.TrimSpace(text)
@@ -76,7 +118,7 @@ func sanitizeByConversationPhase(text string, phase string) string {
 
 func soundsFalseFamiliar(line string) bool {
 	line = strings.TrimSpace(line)
-	return containsAnyPhrase(line,
+	return containsAny(line,
 		"오랜만",
 		"드디어 연락",
 		"기억나",
@@ -90,14 +132,6 @@ func soundsFalseFamiliar(line string) bool {
 	)
 }
 
-func containsAnyPhrase(text string, phrases ...string) bool {
-	for _, phrase := range phrases {
-		if strings.Contains(text, phrase) {
-			return true
-		}
-	}
-	return false
-}
 
 func SplitReplyForTelegram(text string) []string {
 	text = strings.ReplaceAll(text, "\r\n", "\n")
