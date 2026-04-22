@@ -44,6 +44,8 @@ type InsertProactiveMessageParams struct {
 	Score             float64
 	MessageText       string
 	SeedKey           string
+	Channel           string
+	ExternalMessageID string
 	TelegramMessageID int64
 	SentAt            time.Time
 	DeliveryStatus    string
@@ -319,6 +321,8 @@ INSERT INTO tg_proactive_messages (
     score,
     message_text,
     seed_key,
+    channel,
+    external_message_id,
     telegram_message_id,
     sent_at,
     delivery_status,
@@ -328,7 +332,7 @@ INSERT INTO tg_proactive_messages (
     reply_length,
     followup_turn_count
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULLIF($11, ''), NULLIF($12, 0), NULLIF($13, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(NULLIF($14, ''), 'queued'), $15, NULLIF($16, 0), NULLIF($17, ''), NULLIF($18, 0), NULLIF($19, 0)
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULLIF($11, ''), $12, $13, NULLIF($14, 0), NULLIF($15, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(NULLIF($16, ''), 'queued'), $17, NULLIF($18, 0), NULLIF($19, ''), NULLIF($20, 0), NULLIF($21, 0)
 )
 RETURNING
     id,
@@ -343,6 +347,8 @@ RETURNING
     score,
     message_text,
     COALESCE(seed_key, ''),
+    channel,
+    COALESCE(external_message_id, ''),
     COALESCE(telegram_message_id, 0),
     COALESCE(sent_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'),
     delivery_status,
@@ -370,6 +376,8 @@ RETURNING
 		params.Score,
 		params.MessageText,
 		params.SeedKey,
+		normalizedChannel(params.Channel),
+		params.ExternalMessageID,
 		params.TelegramMessageID,
 		params.SentAt,
 		params.DeliveryStatus,
@@ -391,6 +399,8 @@ RETURNING
 		&message.Score,
 		&message.MessageText,
 		&message.SeedKey,
+		&message.Channel,
+		&message.ExternalMessageID,
 		&message.TelegramMessageID,
 		&message.SentAt,
 		&message.DeliveryStatus,
@@ -406,18 +416,20 @@ RETURNING
 	return message, err
 }
 
-func (s *Store) UpdateProactiveMessageDelivery(ctx context.Context, messageID int64, telegramMessageID int64, sentAt time.Time, status string) error {
+func (s *Store) UpdateProactiveMessageDelivery(ctx context.Context, messageID int64, channelName string, externalMessageID string, telegramMessageID int64, sentAt time.Time, status string) error {
 	const query = `
 UPDATE tg_proactive_messages
 SET
-    telegram_message_id = NULLIF($2, 0),
-    sent_at = NULLIF($3, TIMESTAMPTZ '0001-01-01 00:00:00+00'),
-    delivery_status = $4,
+    channel = $2,
+    external_message_id = $3,
+    telegram_message_id = NULLIF($4, 0),
+    sent_at = NULLIF($5, TIMESTAMPTZ '0001-01-01 00:00:00+00'),
+    delivery_status = $6,
     updated_at = NOW()
 WHERE id = $1
 `
 
-	_, err := s.pool.Exec(ctx, query, messageID, telegramMessageID, sentAt, status)
+	_, err := s.pool.Exec(ctx, query, messageID, normalizedChannel(channelName), externalMessageID, telegramMessageID, sentAt, status)
 	return err
 }
 
@@ -453,6 +465,8 @@ SELECT
     score,
     message_text,
     COALESCE(seed_key, ''),
+    channel,
+    COALESCE(external_message_id, ''),
     COALESCE(telegram_message_id, 0),
     COALESCE(sent_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'),
     delivery_status,
@@ -492,6 +506,8 @@ LIMIT $2
 			&message.Score,
 			&message.MessageText,
 			&message.SeedKey,
+			&message.Channel,
+			&message.ExternalMessageID,
 			&message.TelegramMessageID,
 			&message.SentAt,
 			&message.DeliveryStatus,
@@ -530,6 +546,8 @@ SELECT
     score,
     message_text,
     COALESCE(seed_key, ''),
+    channel,
+    COALESCE(external_message_id, ''),
     COALESCE(telegram_message_id, 0),
     COALESCE(sent_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'),
     delivery_status,
@@ -568,6 +586,8 @@ LIMIT $2
 			&message.Score,
 			&message.MessageText,
 			&message.SeedKey,
+			&message.Channel,
+			&message.ExternalMessageID,
 			&message.TelegramMessageID,
 			&message.SentAt,
 			&message.DeliveryStatus,
@@ -717,10 +737,14 @@ LIMIT $1
 	return sessions, nil
 }
 
-func (s *Store) ListActiveProactiveSessions(ctx context.Context, limit int) ([]model.ProactiveSession, error) {
+func (s *Store) ListActiveProactiveSessions(ctx context.Context, botID string, channelName string, limit int) ([]model.ProactiveSession, error) {
 	const query = `
 SELECT
     u.id,
+    u.bot_id,
+    u.channel,
+    u.external_user_id,
+    u.external_chat_id,
     u.telegram_user_id,
     u.telegram_chat_id,
     u.username,
@@ -748,11 +772,13 @@ FROM tg_chat_sessions s
 JOIN tg_users u ON u.id = s.user_id
 WHERE s.session_status = 'active'
   AND s.proactive_opt_in = TRUE
+  AND u.bot_id = $2
+  AND u.channel = $3
 ORDER BY s.last_message_at DESC, s.id DESC
 LIMIT $1
 `
 
-	rows, err := s.pool.Query(ctx, query, limit)
+	rows, err := s.pool.Query(ctx, query, limit, normalizedBotID(botID), normalizedChannel(channelName))
 	if err != nil {
 		return nil, err
 	}
@@ -763,6 +789,10 @@ LIMIT $1
 		var item model.ProactiveSession
 		if err := rows.Scan(
 			&item.User.ID,
+			&item.User.BotID,
+			&item.User.Channel,
+			&item.User.ExternalUserID,
+			&item.User.ExternalChatID,
 			&item.User.TelegramUserID,
 			&item.User.TelegramChatID,
 			&item.User.Username,

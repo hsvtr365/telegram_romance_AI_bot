@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -15,6 +16,10 @@ type Store struct {
 }
 
 type UpsertUserParams struct {
+	BotID          string
+	Channel        string
+	ExternalUserID string
+	ExternalChatID string
 	TelegramUserID int64
 	TelegramChatID int64
 	Username       string
@@ -23,6 +28,8 @@ type UpsertUserParams struct {
 
 type InsertMessageParams struct {
 	SessionID         int64
+	Channel           string
+	ExternalMessageID string
 	TelegramMessageID int64
 	TelegramUpdateID  int64
 	Role              string
@@ -55,13 +62,52 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 	const schema = `
 CREATE TABLE IF NOT EXISTS tg_users (
     id BIGSERIAL PRIMARY KEY,
-    telegram_user_id BIGINT NOT NULL UNIQUE,
-    telegram_chat_id BIGINT NOT NULL UNIQUE,
+    bot_id TEXT NOT NULL DEFAULT 'default',
+    channel TEXT NOT NULL DEFAULT 'telegram',
+    external_user_id TEXT NOT NULL DEFAULT '',
+    external_chat_id TEXT NOT NULL DEFAULT '',
+    telegram_user_id BIGINT NOT NULL,
+    telegram_chat_id BIGINT NOT NULL,
     username VARCHAR(255),
     first_name VARCHAR(255),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE tg_users
+    ADD COLUMN IF NOT EXISTS bot_id TEXT NOT NULL DEFAULT 'default',
+    ADD COLUMN IF NOT EXISTS channel TEXT NOT NULL DEFAULT 'telegram',
+    ADD COLUMN IF NOT EXISTS external_user_id TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS external_chat_id TEXT NOT NULL DEFAULT '';
+
+UPDATE tg_users
+SET bot_id = 'seo-taegyu'
+WHERE bot_id = 'default';
+
+UPDATE tg_users
+SET channel = 'telegram'
+WHERE channel = '';
+
+UPDATE tg_users
+SET external_user_id = telegram_user_id::text
+WHERE external_user_id = '';
+
+UPDATE tg_users
+SET external_chat_id = telegram_chat_id::text
+WHERE external_chat_id = '';
+
+ALTER TABLE tg_users
+    DROP CONSTRAINT IF EXISTS tg_users_telegram_user_id_key,
+    DROP CONSTRAINT IF EXISTS tg_users_telegram_chat_id_key;
+
+DROP INDEX IF EXISTS idx_tg_users_bot_telegram_user;
+DROP INDEX IF EXISTS idx_tg_users_bot_telegram_chat;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tg_users_bot_channel_external_user
+    ON tg_users (bot_id, channel, external_user_id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tg_users_bot_channel_external_chat
+    ON tg_users (bot_id, channel, external_chat_id);
 
 CREATE TABLE IF NOT EXISTS tg_chat_sessions (
     id BIGSERIAL PRIMARY KEY,
@@ -111,6 +157,8 @@ CREATE INDEX IF NOT EXISTS idx_tg_chat_sessions_proactive_scan
 CREATE TABLE IF NOT EXISTS tg_chat_messages (
     id BIGSERIAL PRIMARY KEY,
     session_id BIGINT NOT NULL REFERENCES tg_chat_sessions(id) ON DELETE CASCADE,
+    channel TEXT NOT NULL DEFAULT 'telegram',
+    external_message_id TEXT NOT NULL DEFAULT '',
     telegram_message_id BIGINT,
     telegram_update_id BIGINT,
     role VARCHAR(16) NOT NULL,
@@ -119,6 +167,19 @@ CREATE TABLE IF NOT EXISTS tg_chat_messages (
     mode VARCHAR(32) NOT NULL DEFAULT 'spicy',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE tg_chat_messages
+    ADD COLUMN IF NOT EXISTS channel TEXT NOT NULL DEFAULT 'telegram',
+    ADD COLUMN IF NOT EXISTS external_message_id TEXT NOT NULL DEFAULT '';
+
+UPDATE tg_chat_messages
+SET channel = 'telegram'
+WHERE channel = '';
+
+UPDATE tg_chat_messages
+SET external_message_id = telegram_message_id::text
+WHERE external_message_id = ''
+  AND telegram_message_id IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_tg_chat_messages_session_id_id
     ON tg_chat_messages (session_id, id DESC);
@@ -157,6 +218,8 @@ CREATE TABLE IF NOT EXISTS tg_proactive_messages (
     score NUMERIC(6,2) NOT NULL,
     message_text TEXT NOT NULL,
     seed_key VARCHAR(128),
+    channel TEXT NOT NULL DEFAULT 'telegram',
+    external_message_id TEXT NOT NULL DEFAULT '',
     telegram_message_id BIGINT,
     sent_at TIMESTAMPTZ,
     delivery_status VARCHAR(32) NOT NULL DEFAULT 'queued',
@@ -169,6 +232,19 @@ CREATE TABLE IF NOT EXISTS tg_proactive_messages (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (session_id, trigger_type, trigger_ref_id)
 );
+
+ALTER TABLE tg_proactive_messages
+    ADD COLUMN IF NOT EXISTS channel TEXT NOT NULL DEFAULT 'telegram',
+    ADD COLUMN IF NOT EXISTS external_message_id TEXT NOT NULL DEFAULT '';
+
+UPDATE tg_proactive_messages
+SET channel = 'telegram'
+WHERE channel = '';
+
+UPDATE tg_proactive_messages
+SET external_message_id = telegram_message_id::text
+WHERE external_message_id = ''
+  AND telegram_message_id IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_tg_proactive_messages_session_sent
     ON tg_proactive_messages (session_id, sent_at DESC);
@@ -439,30 +515,46 @@ CREATE INDEX IF NOT EXISTS idx_tg_session_custom_slots_session
 func (s *Store) UpsertUser(ctx context.Context, params UpsertUserParams) (model.User, error) {
 	const query = `
 INSERT INTO tg_users (
+    bot_id,
+    channel,
+    external_user_id,
+    external_chat_id,
     telegram_user_id,
     telegram_chat_id,
     username,
     first_name
-) VALUES ($1, $2, $3, $4)
-ON CONFLICT (telegram_user_id) DO UPDATE
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+ON CONFLICT (bot_id, channel, external_user_id) DO UPDATE
 SET
+    external_chat_id = EXCLUDED.external_chat_id,
     telegram_chat_id = EXCLUDED.telegram_chat_id,
     username = EXCLUDED.username,
     first_name = EXCLUDED.first_name,
     updated_at = NOW()
-RETURNING id, telegram_user_id, telegram_chat_id, username, first_name, created_at, updated_at
+RETURNING id, bot_id, channel, external_user_id, external_chat_id, telegram_user_id, telegram_chat_id, username, first_name, created_at, updated_at
 `
 
 	var user model.User
+	channelName := normalizedChannel(params.Channel)
+	externalUserID := normalizedExternalID(params.ExternalUserID, params.TelegramUserID)
+	externalChatID := normalizedExternalID(params.ExternalChatID, params.TelegramChatID)
 	err := s.pool.QueryRow(
 		ctx,
 		query,
+		normalizedBotID(params.BotID),
+		channelName,
+		externalUserID,
+		externalChatID,
 		params.TelegramUserID,
 		params.TelegramChatID,
 		params.Username,
 		params.FirstName,
 	).Scan(
 		&user.ID,
+		&user.BotID,
+		&user.Channel,
+		&user.ExternalUserID,
+		&user.ExternalChatID,
 		&user.TelegramUserID,
 		&user.TelegramChatID,
 		&user.Username,
@@ -546,14 +638,16 @@ func (s *Store) InsertMessage(ctx context.Context, params InsertMessageParams) (
 	const query = `
 INSERT INTO tg_chat_messages (
     session_id,
+    channel,
+    external_message_id,
     telegram_message_id,
     telegram_update_id,
     role,
     content,
     content_len,
     mode
-) VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING id, session_id, role, content, mode, created_at
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+RETURNING id, session_id, channel, COALESCE(external_message_id, ''), COALESCE(telegram_message_id, 0), COALESCE(telegram_update_id, 0), role, content, mode, created_at
 `
 
 	var message model.Message
@@ -561,6 +655,8 @@ RETURNING id, session_id, role, content, mode, created_at
 		ctx,
 		query,
 		params.SessionID,
+		normalizedChannel(params.Channel),
+		params.ExternalMessageID,
 		nullableInt64(params.TelegramMessageID),
 		nullableInt64(params.TelegramUpdateID),
 		params.Role,
@@ -570,6 +666,10 @@ RETURNING id, session_id, role, content, mode, created_at
 	).Scan(
 		&message.ID,
 		&message.SessionID,
+		&message.Channel,
+		&message.ExternalMessageID,
+		&message.TelegramMessageID,
+		&message.TelegramUpdateID,
 		&message.Role,
 		&message.Content,
 		&message.Mode,
@@ -819,16 +919,18 @@ ORDER BY id ASC
 	return messages, nil
 }
 
-func (s *Store) ListSessionIDsByTelegramUser(ctx context.Context, telegramUserID int64) ([]int64, error) {
+func (s *Store) ListSessionIDsByExternalUser(ctx context.Context, botID string, channelName string, externalUserID string) ([]int64, error) {
 	const query = `
 SELECT s.id
 FROM tg_chat_sessions s
 JOIN tg_users u ON u.id = s.user_id
-WHERE u.telegram_user_id = $1
+WHERE u.bot_id = $1
+  AND u.channel = $2
+  AND u.external_user_id = $3
 ORDER BY s.id ASC
 `
 
-	rows, err := s.pool.Query(ctx, query, telegramUserID)
+	rows, err := s.pool.Query(ctx, query, normalizedBotID(botID), normalizedChannel(channelName), strings.TrimSpace(externalUserID))
 	if err != nil {
 		return nil, err
 	}
@@ -850,13 +952,15 @@ ORDER BY s.id ASC
 	return sessionIDs, nil
 }
 
-func (s *Store) DeleteConversationByTelegramUser(ctx context.Context, telegramUserID int64) (bool, error) {
+func (s *Store) DeleteConversationByExternalUser(ctx context.Context, botID string, channelName string, externalUserID string) (bool, error) {
 	const query = `
 DELETE FROM tg_users
-WHERE telegram_user_id = $1
+WHERE bot_id = $1
+  AND channel = $2
+  AND external_user_id = $3
 `
 
-	tag, err := s.pool.Exec(ctx, query, telegramUserID)
+	tag, err := s.pool.Exec(ctx, query, normalizedBotID(botID), normalizedChannel(channelName), strings.TrimSpace(externalUserID))
 	if err != nil {
 		return false, err
 	}
@@ -869,6 +973,33 @@ func nullableInt64(value int64) any {
 		return nil
 	}
 	return value
+}
+
+func normalizedBotID(botID string) string {
+	botID = strings.TrimSpace(botID)
+	if botID == "" {
+		return "default"
+	}
+	return botID
+}
+
+func normalizedChannel(channelName string) string {
+	channelName = strings.TrimSpace(strings.ToLower(channelName))
+	if channelName == "" {
+		return "telegram"
+	}
+	return channelName
+}
+
+func normalizedExternalID(value string, numericFallback int64) string {
+	value = strings.TrimSpace(value)
+	if value != "" {
+		return value
+	}
+	if numericFallback == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d", numericFallback)
 }
 
 func (s *Store) String() string {

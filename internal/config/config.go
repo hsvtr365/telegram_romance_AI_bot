@@ -1,8 +1,10 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -10,7 +12,9 @@ import (
 type Config struct {
 	App       AppConfig
 	Telegram  TelegramConfig
+	Bots      []BotConfig
 	Ollama    OllamaConfig
+	Gemini    GeminiConfig
 	Storage   StorageConfig
 	Chat      ChatConfig
 	Proactive ProactiveConfig
@@ -24,10 +28,38 @@ type AppConfig struct {
 }
 
 type TelegramConfig struct {
-	BotToken       string
 	AllowedUpdates []string
 	PollTimeoutSec int
 	PollLimit      int
+}
+
+type BotConfig struct {
+	ID                 string          `json:"id"`
+	Name               string          `json:"name"`
+	TelegramBotToken   string          `json:"telegram_bot_token"`
+	PersonaPromptPath  string          `json:"persona_prompt_path"`
+	PersonaPrompt      string          `json:"-"`
+	PolicyPath         string          `json:"policy_path"`
+	Channels           []ChannelConfig `json:"channels"`
+	RewardTTSEnabled   bool            `json:"reward_tts_enabled"`
+	DefaultChatMode    string          `json:"default_chat_mode"`
+	WelcomeText        string          `json:"welcome_text"`
+	FallbackText       string          `json:"fallback_text"`
+	ResetText          string          `json:"reset_text"`
+	ResetOpeningText   string          `json:"reset_opening_text"`
+	ProactiveOnText    string          `json:"proactive_on_text"`
+	ProactiveOffText   string          `json:"proactive_off_text"`
+	ProactiveErrorText string          `json:"proactive_error_text"`
+}
+
+type ChannelConfig struct {
+	Type  string `json:"type"`
+	Token string `json:"token"`
+	Mode  string `json:"mode"`
+}
+
+type botsConfigFile struct {
+	Bots []BotConfig `json:"bots"`
 }
 
 type OllamaConfig struct {
@@ -96,6 +128,16 @@ type ProactiveConfig struct {
 	MaxCandidatesPerScan    int
 	ReminderModel           string
 	ReminderBaseURL         string
+	RewardTTSMinFollowups   int
+}
+
+type GeminiConfig struct {
+	APIKey          string
+	TTSModel        string
+	TTSVoiceName    string
+	TTSAudioProfile string
+	TTSTimeoutSec   int
+	TTSDebugDir     string
 }
 
 type HolidayConfig struct {
@@ -145,7 +187,6 @@ func Load(dotenvPath string) (Config, error) {
 			Port: envInt("APP_PORT", 8080),
 		},
 		Telegram: TelegramConfig{
-			BotToken:       strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")),
 			AllowedUpdates: envCSV("TELEGRAM_ALLOWED_UPDATES", []string{"message"}),
 			PollTimeoutSec: envInt("TELEGRAM_POLL_TIMEOUT_SEC", 30),
 			PollLimit:      envInt("TELEGRAM_POLL_LIMIT", 50),
@@ -162,6 +203,14 @@ func Load(dotenvPath string) (Config, error) {
 			NumCtx:                 envInt("OLLAMA_NUM_CTX", 4096),
 			Temperature:            envFloat("OLLAMA_TEMPERATURE", 0.9),
 			TopP:                   envFloat("OLLAMA_TOP_P", 0.9),
+		},
+		Gemini: GeminiConfig{
+			APIKey:          strings.TrimSpace(os.Getenv("GEMINI_API_KEY")),
+			TTSModel:        envString("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
+			TTSVoiceName:    envString("GEMINI_TTS_VOICE_NAME", "Charon"),
+			TTSAudioProfile: envString("GEMINI_TTS_AUDIO_PROFILE", ""),
+			TTSTimeoutSec:   envInt("GEMINI_TTS_TIMEOUT_SEC", 45),
+			TTSDebugDir:     envString("GEMINI_TTS_DEBUG_DIR", ""),
 		},
 		Storage: StorageConfig{
 			PostgresDSN: strings.TrimSpace(os.Getenv("POSTGRES_DSN")),
@@ -208,6 +257,7 @@ func Load(dotenvPath string) (Config, error) {
 			MaxCandidatesPerScan:    envInt("PROACTIVE_MAX_CANDIDATES_PER_SCAN", 100),
 			ReminderModel:           envString("PROACTIVE_REMINDER_MODEL", ""),
 			ReminderBaseURL:         envString("PROACTIVE_REMINDER_BASE_URL", "http://127.0.0.1:11434"),
+			RewardTTSMinFollowups:   envInt("PROACTIVE_REWARD_TTS_MIN_FOLLOWUPS", 1),
 		},
 		Holiday: HolidayConfig{
 			SyncEnabled:       envBool("HOLIDAY_SYNC_ENABLED", true),
@@ -220,14 +270,57 @@ func Load(dotenvPath string) (Config, error) {
 		},
 	}
 
+	bots, err := loadBotConfigs(dotenvPath)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.Bots = bots
+
 	return cfg, nil
 }
 
 func (c Config) Validate() error {
 	var missing []string
 
-	if c.Telegram.BotToken == "" {
-		missing = append(missing, "TELEGRAM_BOT_TOKEN")
+	if len(c.Bots) == 0 {
+		missing = append(missing, "TELEGRAM_BOTS_CONFIG_PATH or TELEGRAM_BOT_TOKEN")
+	}
+
+	seenBotIDs := make(map[string]struct{}, len(c.Bots))
+	for _, bot := range c.Bots {
+		if bot.ID == "" {
+			missing = append(missing, "bots[].id")
+		} else if _, ok := seenBotIDs[bot.ID]; ok {
+			missing = append(missing, "duplicate bot id: "+bot.ID)
+		} else {
+			seenBotIDs[bot.ID] = struct{}{}
+		}
+		if len(bot.Channels) == 0 {
+			missing = append(missing, "bots["+bot.ID+"].channels")
+		}
+		for idx, channel := range bot.Channels {
+			if channel.Type == "" {
+				missing = append(missing, fmt.Sprintf("bots[%s].channels[%d].type", bot.ID, idx))
+			}
+			switch channel.Type {
+			case "telegram":
+				if channel.Token == "" {
+					missing = append(missing, fmt.Sprintf("bots[%s].channels[%d].token", bot.ID, idx))
+				}
+			case "discord":
+				if channel.Token == "" {
+					missing = append(missing, fmt.Sprintf("bots[%s].channels[%d].token", bot.ID, idx))
+				}
+			default:
+				missing = append(missing, fmt.Sprintf("bots[%s].channels[%d].type unsupported: %s", bot.ID, idx, channel.Type))
+			}
+		}
+		if bot.PersonaPromptPath == "" {
+			missing = append(missing, "bots["+bot.ID+"].persona_prompt_path")
+		}
+		if bot.PersonaPrompt == "" {
+			missing = append(missing, "bots["+bot.ID+"].persona_prompt")
+		}
 	}
 
 	if c.Ollama.BaseURL == "" {
@@ -255,6 +348,157 @@ func (c Config) Validate() error {
 	}
 
 	return nil
+}
+
+func loadBotConfigs(dotenvPath string) ([]BotConfig, error) {
+	path := envString("TELEGRAM_BOTS_CONFIG_PATH", "")
+	if path == "" {
+		defaultPath := filepath.Join(filepath.Dir(dotenvPath), "secrets/bots.local.json")
+		if _, err := os.Stat(defaultPath); err == nil {
+			path = defaultPath
+		}
+	}
+	if path != "" {
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(filepath.Dir(dotenvPath), path)
+		}
+		payload, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read telegram bots config: %w", err)
+		}
+
+		var file botsConfigFile
+		if err := json.Unmarshal(payload, &file); err != nil {
+			return nil, fmt.Errorf("parse telegram bots config: %w", err)
+		}
+
+		personaBaseDir := filepath.Dir(dotenvPath)
+		for idx := range file.Bots {
+			normalizeBotConfig(&file.Bots[idx])
+			prompt, err := readPromptFile(personaBaseDir, file.Bots[idx].PersonaPromptPath)
+			if err != nil {
+				return nil, err
+			}
+			file.Bots[idx].PersonaPrompt = prompt
+		}
+		return file.Bots, nil
+	}
+
+	token := strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN"))
+	if token == "" {
+		return nil, nil
+	}
+
+	bot := BotConfig{
+		ID:                envString("TELEGRAM_BOT_ID", "seo-taegyu"),
+		Name:              envString("TELEGRAM_BOT_NAME", "서태규"),
+		TelegramBotToken:  token,
+		PersonaPromptPath: envString("TELEGRAM_PERSONA_PROMPT_PATH", "configs/personas/seo-taegyu.md"),
+		DefaultChatMode:   envString("DEFAULT_CHAT_MODE", "spicy"),
+		WelcomeText:       "이제 왔어? 늦었네. 그래도 왔으니까 봐줄게.",
+		FallbackText:      "잠깐만, 지금 답 고르는 중이야. 한 번만 더 툭 던져봐.",
+		ResetText:         "리셋했어. 아까까지 했던 말은 다 지웠고, 지금부터 처음 본 것처럼 다시 시작할게.",
+	}
+	normalizeBotConfig(&bot)
+
+	prompt, err := readPromptFile(filepath.Dir(dotenvPath), bot.PersonaPromptPath)
+	if err != nil {
+		return nil, err
+	}
+	bot.PersonaPrompt = prompt
+	return []BotConfig{bot}, nil
+}
+
+func normalizeBotConfig(bot *BotConfig) {
+	bot.ID = strings.TrimSpace(bot.ID)
+	bot.Name = strings.TrimSpace(bot.Name)
+	bot.TelegramBotToken = strings.TrimSpace(bot.TelegramBotToken)
+	bot.TelegramBotToken = expandEnvReference(bot.TelegramBotToken)
+	bot.PersonaPromptPath = strings.TrimSpace(bot.PersonaPromptPath)
+	bot.PersonaPrompt = strings.TrimSpace(bot.PersonaPrompt)
+	bot.PolicyPath = strings.TrimSpace(bot.PolicyPath)
+	bot.DefaultChatMode = strings.TrimSpace(bot.DefaultChatMode)
+	bot.WelcomeText = strings.TrimSpace(bot.WelcomeText)
+	bot.FallbackText = strings.TrimSpace(bot.FallbackText)
+	bot.ResetText = strings.TrimSpace(bot.ResetText)
+	bot.ResetOpeningText = strings.TrimSpace(bot.ResetOpeningText)
+	bot.ProactiveOnText = strings.TrimSpace(bot.ProactiveOnText)
+	bot.ProactiveOffText = strings.TrimSpace(bot.ProactiveOffText)
+	bot.ProactiveErrorText = strings.TrimSpace(bot.ProactiveErrorText)
+	for idx := range bot.Channels {
+		bot.Channels[idx].Type = strings.TrimSpace(strings.ToLower(bot.Channels[idx].Type))
+		bot.Channels[idx].Token = expandEnvReference(strings.TrimSpace(bot.Channels[idx].Token))
+		bot.Channels[idx].Mode = strings.TrimSpace(strings.ToLower(bot.Channels[idx].Mode))
+	}
+
+	if bot.ID == "" {
+		bot.ID = "default"
+	}
+	if bot.Name == "" {
+		bot.Name = bot.ID
+	}
+	if bot.DefaultChatMode == "" {
+		bot.DefaultChatMode = "spicy"
+	}
+	if len(bot.Channels) == 0 && bot.TelegramBotToken != "" {
+		bot.Channels = []ChannelConfig{{
+			Type:  "telegram",
+			Token: bot.TelegramBotToken,
+		}}
+	}
+	if bot.TelegramBotToken == "" {
+		for _, channel := range bot.Channels {
+			if channel.Type == "telegram" {
+				bot.TelegramBotToken = channel.Token
+				break
+			}
+		}
+	}
+	if bot.WelcomeText == "" {
+		bot.WelcomeText = "안녕. 왔구나."
+	}
+	if bot.FallbackText == "" {
+		bot.FallbackText = "잠깐만, 다시 한 번 말해줘."
+	}
+	if bot.ResetText == "" {
+		bot.ResetText = "리셋했어. 지금부터 다시 시작할게."
+	}
+	if bot.ResetOpeningText == "" {
+		bot.ResetOpeningText = "좋아, 깔끔하게 다 잊었어. 우리 새로 시작하자.\n안녕. 이름이 뭐야?"
+	}
+	if bot.ProactiveOnText == "" {
+		bot.ProactiveOnText = "선톡 켰어. 타이밍 맞을 때만 먼저 톡할게."
+	}
+	if bot.ProactiveOffText == "" {
+		bot.ProactiveOffText = "선톡 껐어. 이제 네가 먼저 말 걸 때만 답할게."
+	}
+	if bot.ProactiveErrorText == "" {
+		bot.ProactiveErrorText = "선톡 설정하다가 잠깐 꼬였어. 한 번만 다시 쳐줘."
+	}
+}
+
+func expandEnvReference(value string) string {
+	if strings.HasPrefix(value, "${") && strings.HasSuffix(value, "}") {
+		return strings.TrimSpace(os.Getenv(strings.TrimSuffix(strings.TrimPrefix(value, "${"), "}")))
+	}
+	if strings.HasPrefix(value, "env:") {
+		return strings.TrimSpace(os.Getenv(strings.TrimPrefix(value, "env:")))
+	}
+	return value
+}
+
+func readPromptFile(baseDir string, path string) (string, error) {
+	if path == "" {
+		return "", nil
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(baseDir, path)
+	}
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read persona prompt %s: %w", path, err)
+	}
+	return strings.TrimSpace(string(payload)), nil
 }
 
 func envString(key, fallback string) string {

@@ -42,6 +42,10 @@ type Composer struct {
 }
 
 func NewComposer(cfg Config, llm LLM, reminderLLM LLM, seeds SeedLibrary, logger *slog.Logger) *Composer {
+	return NewComposerWithPersona(cfg, chat.DefaultPersona(), llm, reminderLLM, seeds, logger)
+}
+
+func NewComposerWithPersona(cfg Config, persona chat.Persona, llm LLM, reminderLLM LLM, seeds SeedLibrary, logger *slog.Logger) *Composer {
 	cfg = cfg.normalized()
 	if seeds == nil {
 		seeds = NewDefaultSeedLibrary()
@@ -51,7 +55,7 @@ func NewComposer(cfg Config, llm LLM, reminderLLM LLM, seeds SeedLibrary, logger
 		cfg:           cfg,
 		llm:           llm,
 		reminderLLM:   reminderLLM,
-		promptBuilder: NewPromptBuilder(),
+		promptBuilder: NewPromptBuilder(persona),
 		seeds:         seeds,
 		logger:        logger,
 	}

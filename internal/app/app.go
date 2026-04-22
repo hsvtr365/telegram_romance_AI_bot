@@ -3,13 +3,16 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
+	channelx "github.com/hsvtr365/telegram_romance_AI_bot/internal/channel"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/chat"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/config"
+	"github.com/hsvtr365/telegram_romance_AI_bot/internal/gemini"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/holiday"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/httpserver"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/ollama"
@@ -21,12 +24,19 @@ import (
 type App struct {
 	cfg           config.Config
 	logger        *slog.Logger
-	poller        *telegram.Poller
+	bots          []botRuntime
 	httpServer    *httpserver.Server
-	proactive     *proactive.Scheduler
 	holiday       *holiday.Syncer
 	store         *store.Manager
 	modelMonitors []backgroundRunner
+}
+
+type botRuntime struct {
+	id        string
+	name      string
+	channel   string
+	runner    backgroundRunner
+	proactive *proactive.Scheduler
 }
 
 type backgroundRunner interface {
@@ -34,8 +44,6 @@ type backgroundRunner interface {
 }
 
 func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, error) {
-	tgClient := telegram.NewClient(cfg.Telegram.BotToken, logger)
-
 	ollamaClient, mainMonitor := buildPrimaryLLM(cfg.Ollama, logger)
 	modelMonitors := collectRunner(mainMonitor)
 
@@ -114,53 +122,69 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		return nil, err
 	}
 
-	chatService := chat.NewService(chat.Config{
-		RecentTurnLimit:           cfg.Chat.RecentTurnLimit,
-		SummaryTriggerMessages:    cfg.Chat.SummaryTriggerMessages,
-		ResponseMaxChars:          cfg.Chat.ResponseMaxChars,
-		PhaseRulesPath:            cfg.Chat.PhaseRulesPath,
-		StateReviewEnabled:        cfg.Chat.StateReviewEnabled,
-		StateReviewTimeoutMs:      cfg.Chat.StateReviewTimeoutMs,
-		StateReviewWorkers:        cfg.Chat.StateReviewWorkers,
-		StateReviewQueueSize:      cfg.Chat.StateReviewQueueSize,
-		StructuredExtractEnabled:  cfg.Chat.StructuredExtract,
-		StructuredExtractMinChars: cfg.Chat.StructuredMinChars,
-		MemorySlotEnabled:         cfg.Chat.MemorySlotEnabled,
-		MemorySlotMinChars:        cfg.Chat.MemorySlotMinChars,
-		MemorySlotSyncTimeoutMs:   cfg.Chat.MemorySlotSyncTimeoutMs,
-		MemorySlotAsyncTimeoutMs:  cfg.Chat.MemorySlotAsyncTimeoutMs,
-		MemorySlotWorkers:         cfg.Chat.MemorySlotWorkers,
-		MemorySlotQueueSize:       cfg.Chat.MemorySlotQueueSize,
-	}, tgClient, ollamaClient, reminderLLM, structuredLLM, memorySlotLLM, stateReviewLLM, conversationStore, logger)
-
 	holidayResolver := holiday.NewResolver(conversationStore, holiday.ResolverConfig{
 		LookaheadDays:   cfg.Holiday.LookaheadDays,
 		TodayPercent:    cfg.Holiday.PromptTodayPct,
 		UpcomingPercent: cfg.Holiday.PromptUpcomingPct,
 	}, logger)
-	chatService.SetHolidayResolver(holidayResolver)
-
-	poller := telegram.NewPoller(telegram.PollingConfig{
-		TimeoutSec:     cfg.Telegram.PollTimeoutSec,
-		Limit:          cfg.Telegram.PollLimit,
-		AllowedUpdates: cfg.Telegram.AllowedUpdates,
-	}, tgClient, chatService, logger)
 
 	httpServer := httpserver.New(cfg.App.Port, logger)
+	rewardTTS := buildRewardTTS(cfg.Gemini)
 
-	proactiveScheduler := proactive.NewScheduler(proactive.Config{
-		Enabled:                 cfg.Proactive.Enabled,
-		EnableReconnect:         true,
-		EnableEventFollowup:     true,
-		EnableMoodRepair:        true,
-		EnableHabitPing:         true,
-		RecentConversationLimit: cfg.Chat.RecentTurnLimit,
-		FeedbackInterval:        time.Duration(cfg.Proactive.FeedbackIntervalSec) * time.Second,
-		DecisionScanInterval:    time.Duration(cfg.Proactive.ScanIntervalSec) * time.Second,
-		ReminderScanInterval:    time.Duration(cfg.Proactive.ReminderScanIntervalSec) * time.Second,
-		TimezoneName:            cfg.Proactive.DefaultTimezone,
-	}, newProactiveRepository(conversationStore), tgClient, ollamaClient, reminderLLM, logger)
-	proactiveScheduler.SetHolidayResolver(holidayResolver)
+	bots := make([]botRuntime, 0, len(cfg.Bots))
+	for _, botCfg := range cfg.Bots {
+		persona := personaFromConfig(botCfg)
+		for _, channelCfg := range botCfg.Channels {
+			switch channelCfg.Type {
+			case channelx.Telegram:
+				tgClient := telegram.NewClient(channelCfg.Token, logger)
+
+				chatService := chat.NewService(chatConfigFromApp(cfg.Chat), persona, tgClient, ollamaClient, reminderLLM, structuredLLM, memorySlotLLM, stateReviewLLM, conversationStore, logger)
+				chatService.SetHolidayResolver(holidayResolver)
+				if botCfg.RewardTTSEnabled && rewardTTS != nil {
+					chatService.SetRewardAudioGenerator(rewardTTS)
+				}
+
+				poller := telegram.NewPoller(telegram.PollingConfig{
+					BotID:          persona.BotID,
+					TimeoutSec:     cfg.Telegram.PollTimeoutSec,
+					Limit:          cfg.Telegram.PollLimit,
+					AllowedUpdates: cfg.Telegram.AllowedUpdates,
+				}, tgClient, chatService, logger)
+
+				proactiveScheduler := proactive.NewScheduler(proactive.Config{
+					Enabled:                 cfg.Proactive.Enabled,
+					EnableReconnect:         true,
+					EnableEventFollowup:     true,
+					EnableMoodRepair:        true,
+					EnableHabitPing:         true,
+					RecentConversationLimit: cfg.Chat.RecentTurnLimit,
+					FeedbackInterval:        time.Duration(cfg.Proactive.FeedbackIntervalSec) * time.Second,
+					DecisionScanInterval:    time.Duration(cfg.Proactive.ScanIntervalSec) * time.Second,
+					ReminderScanInterval:    time.Duration(cfg.Proactive.ReminderScanIntervalSec) * time.Second,
+					TimezoneName:            cfg.Proactive.DefaultTimezone,
+					RewardTTSEnabled:        botCfg.RewardTTSEnabled,
+					RewardTTSMinFollowups:   cfg.Proactive.RewardTTSMinFollowups,
+				}, persona, newProactiveRepository(conversationStore, persona, channelCfg.Type), tgClient, ollamaClient, reminderLLM, logger)
+				proactiveScheduler.SetHolidayResolver(holidayResolver)
+				if botCfg.RewardTTSEnabled && rewardTTS != nil {
+					proactiveScheduler.SetRewardAudioGenerator(rewardTTS)
+				}
+
+				bots = append(bots, botRuntime{
+					id:        persona.BotID,
+					name:      persona.Name,
+					channel:   channelCfg.Type,
+					runner:    poller,
+					proactive: proactiveScheduler,
+				})
+			case channelx.Discord:
+				return nil, fmt.Errorf("discord channel is configured for bot %q but the discord adapter is not implemented yet", persona.BotID)
+			default:
+				return nil, fmt.Errorf("unsupported channel %q for bot %q", channelCfg.Type, persona.BotID)
+			}
+		}
+	}
 
 	var holidaySyncer *holiday.Syncer
 	if cfg.Holiday.SyncEnabled {
@@ -177,9 +201,8 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	return &App{
 		cfg:           cfg,
 		logger:        logger,
-		poller:        poller,
+		bots:          bots,
 		httpServer:    httpServer,
-		proactive:     proactiveScheduler,
 		holiday:       holidaySyncer,
 		store:         conversationStore,
 		modelMonitors: modelMonitors,
@@ -190,8 +213,9 @@ func (a *App) Run(ctx context.Context) error {
 	defer a.store.Close()
 
 	a.logger.Info(
-		"starting telegram long polling bot",
+		"starting bot channel runners",
 		"app", a.cfg.App.Name,
+		"bot_count", len(a.bots),
 		"ollama_model", a.cfg.Ollama.Model,
 		"reminder_model", coalesce(a.cfg.Proactive.ReminderModel, a.cfg.Ollama.Model),
 		"structured_model", coalesce(a.cfg.Chat.StructuredModel, a.cfg.Ollama.Model),
@@ -199,20 +223,26 @@ func (a *App) Run(ctx context.Context) error {
 		"state_review_model", coalesce(coalesce(a.cfg.Chat.StateReviewModel, a.cfg.Chat.StructuredModel), a.cfg.Ollama.Model),
 	)
 
-	errCh := make(chan error, 4)
+	errCh := make(chan error, 4+len(a.bots)*2)
 
 	go func() {
 		errCh <- a.httpServer.Run(ctx)
 	}()
 
-	go func() {
-		errCh <- a.poller.Run(ctx)
-	}()
-
-	if a.proactive != nil {
-		go func() {
-			errCh <- a.proactive.Run(ctx)
-		}()
+	for _, bot := range a.bots {
+		current := bot
+		if current.runner != nil {
+			go func() {
+				a.logger.Info("starting bot channel runner", "bot_id", current.id, "bot_name", current.name, "channel", current.channel)
+				errCh <- current.runner.Run(ctx)
+			}()
+		}
+		if current.proactive != nil {
+			go func() {
+				a.logger.Info("starting proactive scheduler", "bot_id", current.id, "bot_name", current.name, "channel", current.channel)
+				errCh <- current.proactive.Run(ctx)
+			}()
+		}
 	}
 
 	if a.holiday != nil {
@@ -241,6 +271,57 @@ func (a *App) Run(ctx context.Context) error {
 			return err
 		}
 	}
+}
+
+func personaFromConfig(bot config.BotConfig) chat.Persona {
+	return chat.Persona{
+		BotID:              bot.ID,
+		Name:               bot.Name,
+		SystemPrompt:       bot.PersonaPrompt,
+		DefaultSessionMode: bot.DefaultChatMode,
+		WelcomeText:        bot.WelcomeText,
+		FallbackText:       bot.FallbackText,
+		ResetText:          bot.ResetText,
+		ResetOpeningText:   bot.ResetOpeningText,
+		ProactiveOnText:    bot.ProactiveOnText,
+		ProactiveOffText:   bot.ProactiveOffText,
+		ProactiveErrorText: bot.ProactiveErrorText,
+	}.Normalized()
+}
+
+func chatConfigFromApp(cfg config.ChatConfig) chat.Config {
+	return chat.Config{
+		RecentTurnLimit:           cfg.RecentTurnLimit,
+		SummaryTriggerMessages:    cfg.SummaryTriggerMessages,
+		ResponseMaxChars:          cfg.ResponseMaxChars,
+		PhaseRulesPath:            cfg.PhaseRulesPath,
+		StateReviewEnabled:        cfg.StateReviewEnabled,
+		StateReviewTimeoutMs:      cfg.StateReviewTimeoutMs,
+		StateReviewWorkers:        cfg.StateReviewWorkers,
+		StateReviewQueueSize:      cfg.StateReviewQueueSize,
+		StructuredExtractEnabled:  cfg.StructuredExtract,
+		StructuredExtractMinChars: cfg.StructuredMinChars,
+		MemorySlotEnabled:         cfg.MemorySlotEnabled,
+		MemorySlotMinChars:        cfg.MemorySlotMinChars,
+		MemorySlotSyncTimeoutMs:   cfg.MemorySlotSyncTimeoutMs,
+		MemorySlotAsyncTimeoutMs:  cfg.MemorySlotAsyncTimeoutMs,
+		MemorySlotWorkers:         cfg.MemorySlotWorkers,
+		MemorySlotQueueSize:       cfg.MemorySlotQueueSize,
+	}
+}
+
+func buildRewardTTS(cfg config.GeminiConfig) proactive.AudioGenerator {
+	if strings.TrimSpace(cfg.APIKey) == "" {
+		return nil
+	}
+	return gemini.NewTTSClient(gemini.TTSConfig{
+		APIKey:       cfg.APIKey,
+		Model:        cfg.TTSModel,
+		VoiceName:    cfg.TTSVoiceName,
+		AudioProfile: cfg.TTSAudioProfile,
+		Timeout:      time.Duration(cfg.TTSTimeoutSec) * time.Second,
+		DebugDir:     cfg.TTSDebugDir,
+	})
 }
 
 func minInt(a, b int) int {

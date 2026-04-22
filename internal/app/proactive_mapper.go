@@ -1,6 +1,7 @@
 package app
 
 import (
+	channelx "github.com/hsvtr365/telegram_romance_AI_bot/internal/channel"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/proactive"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/store/model"
 	pgstore "github.com/hsvtr365/telegram_romance_AI_bot/internal/store/postgres"
@@ -8,8 +9,13 @@ import (
 
 func mapProactiveSession(item model.ProactiveSession) proactive.SessionSnapshot {
 	return proactive.SessionSnapshot{
-		SessionID:                   item.Session.ID,
-		UserID:                      item.User.ID,
+		SessionID: item.Session.ID,
+		UserID:    item.User.ID,
+		Target: channelx.OutboundTarget{
+			BotID:          item.User.BotID,
+			Channel:        fallbackString(item.User.Channel, channelx.Telegram),
+			ExternalChatID: item.User.ExternalChatID,
+		},
 		TelegramChatID:              item.User.TelegramChatID,
 		Mode:                        item.Session.Mode,
 		LastUserMessageAt:           item.Session.LastUserMessageAt,
@@ -69,6 +75,8 @@ func mapProactiveMessageRecord(message model.ProactiveMessage) proactive.Proacti
 		Score:             message.Score,
 		MessageText:       message.MessageText,
 		SeedKey:           message.SeedKey,
+		Channel:           message.Channel,
+		ExternalMessageID: message.ExternalMessageID,
 		TelegramMessageID: message.TelegramMessageID,
 		SentAt:            message.SentAt,
 		DeliveryStatus:    proactive.DeliveryStatus(message.DeliveryStatus),

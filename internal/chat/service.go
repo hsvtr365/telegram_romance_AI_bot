@@ -11,18 +11,19 @@ import (
 	"sync"
 	"time"
 
+	channelx "github.com/hsvtr365/telegram_romance_AI_bot/internal/channel"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/holiday"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/promptutil"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/store"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/store/model"
 	pgstore "github.com/hsvtr365/telegram_romance_AI_bot/internal/store/postgres"
-	"github.com/hsvtr365/telegram_romance_AI_bot/internal/telegram"
 	"github.com/hsvtr365/telegram_romance_AI_bot/pkg/logx"
 )
 
-type Messenger interface {
-	SendMessage(ctx context.Context, chatID int64, text string) error
-	SendChatAction(ctx context.Context, chatID int64, action string) error
+type Messenger = channelx.Messenger
+
+type AudioGenerator interface {
+	GenerateAudio(ctx context.Context, transcript string) (channelx.AudioAttachment, error)
 }
 
 type Config struct {
@@ -46,6 +47,7 @@ type Config struct {
 
 type Service struct {
 	cfg                  Config
+	persona              Persona
 	bot                  Messenger
 	llm                  LLM
 	reminderLLM          LLM
@@ -59,14 +61,18 @@ type Service struct {
 	memoryAnalyzer       *MemorySlotAnalyzer
 	analyticRunner       *AsyncRunner
 	holidayResolver      holiday.ContextResolver
+	rewardAudio          AudioGenerator
 	logger               *slog.Logger
 
 	generationCoordinator *GenerationCoordinator
 	chatLocksMu           sync.Mutex
-	chatLocks             map[int64]*sync.Mutex
+	chatLocks             map[string]*sync.Mutex
+	rewardAudioMu         sync.Mutex
+	rewardAudioSent       map[string]struct{}
 }
 
-func NewService(cfg Config, bot Messenger, llm LLM, reminderLLM LLM, structuredLLM LLM, memorySlotLLM LLM, stateReviewLLM LLM, conversationStore *store.Manager, logger *slog.Logger) *Service {
+func NewService(cfg Config, persona Persona, bot Messenger, llm LLM, reminderLLM LLM, structuredLLM LLM, memorySlotLLM LLM, stateReviewLLM LLM, conversationStore *store.Manager, logger *slog.Logger) *Service {
+	persona = persona.Normalized()
 	if cfg.RecentTurnLimit <= 0 {
 		cfg.RecentTurnLimit = 30
 	}
@@ -148,11 +154,12 @@ func NewService(cfg Config, bot Messenger, llm LLM, reminderLLM LLM, structuredL
 
 	return &Service{
 		cfg:                   cfg,
+		persona:               persona,
 		bot:                   bot,
 		llm:                   llm,
 		reminderLLM:           reminderLLM,
 		store:                 conversationStore,
-		prompt:                NewPromptBuilder(),
+		prompt:                NewPromptBuilder(persona),
 		fastState:             fastState,
 		stateReviewer:         reviewer,
 		stateReviewRunner:     stateReviewRunner,
@@ -163,18 +170,19 @@ func NewService(cfg Config, bot Messenger, llm LLM, reminderLLM LLM, structuredL
 		holidayResolver:       holiday.NewResolver(conversationStore, holiday.ResolverConfig{}, logger),
 		logger:                logger,
 		generationCoordinator: NewGenerationCoordinator(),
-		chatLocks:             make(map[int64]*sync.Mutex),
+		chatLocks:             make(map[string]*sync.Mutex),
+		rewardAudioSent:       make(map[string]struct{}),
 	}
 }
 
-func (s *Service) getChatLock(chatID int64) *sync.Mutex {
+func (s *Service) getChatLock(chatKey string) *sync.Mutex {
 	s.chatLocksMu.Lock()
 	defer s.chatLocksMu.Unlock()
-	if m, ok := s.chatLocks[chatID]; ok {
+	if m, ok := s.chatLocks[chatKey]; ok {
 		return m
 	}
 	m := &sync.Mutex{}
-	s.chatLocks[chatID] = m
+	s.chatLocks[chatKey] = m
 	return m
 }
 
@@ -185,26 +193,54 @@ func (s *Service) SetHolidayResolver(resolver holiday.ContextResolver) {
 	s.holidayResolver = resolver
 }
 
-func (s *Service) HandleUpdate(ctx context.Context, update telegram.Update) error {
-	if update.Message == nil {
+func (s *Service) SetRewardAudioGenerator(generator AudioGenerator) {
+	if s == nil {
+		return
+	}
+	s.rewardAudio = generator
+}
+
+func (s *Service) botID() string {
+	return s.persona.Normalized().BotID
+}
+
+func (s *Service) defaultMode() string {
+	return s.persona.Normalized().DefaultSessionMode
+}
+
+func (s *Service) sendText(ctx context.Context, message channelx.InboundMessage, text string) error {
+	if s.bot == nil {
 		return nil
 	}
+	return s.bot.SendText(ctx, message.Target(), text)
+}
 
-	if update.Message.Chat.Type != "private" {
+func (s *Service) sendTyping(ctx context.Context, message channelx.InboundMessage) error {
+	if s.bot == nil {
 		return nil
 	}
+	return s.bot.SendTyping(ctx, message.Target())
+}
 
-	input := strings.TrimSpace(update.Message.Text)
+func (s *Service) HandleMessage(ctx context.Context, message channelx.InboundMessage) error {
+	if strings.TrimSpace(message.BotID) == "" {
+		message.BotID = s.botID()
+	}
+	if strings.TrimSpace(message.Channel) == "" {
+		message.Channel = channelx.Telegram
+	}
+
+	input := strings.TrimSpace(message.Text)
 	if input == "" {
 		return nil
 	}
 
-	chatID := update.Message.Chat.ID
+	chatKey := message.LockKey()
 	if s.generationCoordinator != nil {
-		s.generationCoordinator.CancelActive(chatID, interruptReasonNewInput)
+		s.generationCoordinator.CancelActive(chatKey, interruptReasonNewInput)
 	}
 
-	handled, err := s.handleCommand(ctx, update, input)
+	handled, err := s.handleCommand(ctx, message, input)
 	if err != nil {
 		return err
 	}
@@ -212,7 +248,7 @@ func (s *Service) HandleUpdate(ctx context.Context, update telegram.Update) erro
 		return nil
 	}
 
-	chatMu := s.getChatLock(chatID)
+	chatMu := s.getChatLock(chatKey)
 	chatMu.Lock()
 
 	conversation := store.ConversationContext{}
@@ -220,11 +256,11 @@ func (s *Service) HandleUpdate(ctx context.Context, update telegram.Update) erro
 	userTurnCount := 0
 	now := promptNow()
 	userMessage := model.Message{}
-	sourceMessageID := update.UpdateID
+	sourceMessageID := message.UpdateIDInt64()
 	if s.store != nil {
-		stored, err := s.store.BootstrapContext(ctx, *update.Message, DefaultSessionMode, s.cfg.RecentTurnLimit)
+		stored, err := s.store.BootstrapContext(ctx, message, s.defaultMode(), s.cfg.RecentTurnLimit)
 		if err != nil {
-			s.logger.Warn("failed to bootstrap conversation context", "chat_id", update.Message.Chat.ID, "error", err)
+			s.logger.Warn("failed to bootstrap conversation context", "target", message.Target().Key(), "error", err)
 		} else {
 			conversation = stored
 			record, err := s.store.SaveTurnRecord(
@@ -232,9 +268,13 @@ func (s *Service) HandleUpdate(ctx context.Context, update telegram.Update) erro
 				conversation.Session.ID,
 				"user",
 				input,
-				update.Message.MessageID,
-				update.UpdateID,
-				DefaultSessionMode,
+				store.MessageMeta{
+					Channel:           message.Channel,
+					ExternalMessageID: message.ExternalMessageID,
+					TelegramMessageID: message.MessageIDInt64(),
+					TelegramUpdateID:  message.UpdateIDInt64(),
+				},
+				s.defaultMode(),
 				s.cfg.RecentTurnLimit,
 			)
 			if err != nil {
@@ -242,7 +282,7 @@ func (s *Service) HandleUpdate(ctx context.Context, update telegram.Update) erro
 			} else {
 				userMessage = record
 			}
-			s.captureProactiveSignals(ctx, conversation.Session.ID, *update.Message, input)
+			s.captureProactiveSignals(ctx, conversation.Session.ID, message, input)
 			if userMessage.ID != 0 {
 				sourceMessageID = userMessage.ID
 			}
@@ -251,7 +291,7 @@ func (s *Service) HandleUpdate(ctx context.Context, update telegram.Update) erro
 			userTurnCount = conversation.UserTurnCount + 1
 
 			s.applyFastConversationState(ctx, &conversation, input, userTurnCount, sourceMessageID)
-			s.enqueueAsyncStateReview(chatID, &conversation, input, userTurnCount, sourceMessageID)
+			s.enqueueAsyncStateReview(chatKey, &conversation, input, userTurnCount, sourceMessageID)
 			s.enqueueProfileBatchReview(&conversation, userTurnCount, sourceMessageID, false)
 
 			if userTurnCount > 0 && detectProfilePromptDiscomfort(input) {
@@ -267,7 +307,7 @@ func (s *Service) HandleUpdate(ctx context.Context, update telegram.Update) erro
 				len(conversation.RecentConversation),
 				input,
 				userTurnCount,
-				messageTimestamp(*update.Message),
+				messageTimestamp(message),
 			)
 			if s.cfg.MemorySlotEnabled && conversation.Session.ID != 0 {
 				if slots, err := s.store.ListActiveTopicSlots(ctx, conversation.Session.ID, 10); err != nil {
@@ -286,21 +326,22 @@ func (s *Service) HandleUpdate(ctx context.Context, update telegram.Update) erro
 	regenCount := 0
 	waitBeforeFirstGenerate := true
 	promptGenerated := false
+	finalReply := ""
 
 generateLoop:
 	for {
 		stateForAttempt := normalizeConversationStateMachine(conversation.ConversationStateMachine)
-		handle, genCtx := s.generationCoordinator.Begin(ctx, chatID, conversation.Session.ID, sourceMessageID, stateForAttempt.Revision, regenCount)
+		handle, genCtx := s.generationCoordinator.Begin(ctx, chatKey, conversation.Session.ID, sourceMessageID, stateForAttempt.Revision, regenCount)
 
 		if waitBeforeFirstGenerate {
 			waitBeforeFirstGenerate = false
 			select {
 			case <-ctx.Done():
-				s.generationCoordinator.Finish(chatID, handle.GenerationID)
+				s.generationCoordinator.Finish(chatKey, handle.GenerationID)
 				return ctx.Err()
 			case <-genCtx.Done():
-				reason := s.generationCoordinator.InterruptReason(chatID, handle.GenerationID)
-				s.generationCoordinator.Finish(chatID, handle.GenerationID)
+				reason := s.generationCoordinator.InterruptReason(chatKey, handle.GenerationID)
+				s.generationCoordinator.Finish(chatKey, handle.GenerationID)
 				if reason == interruptReasonSafetyRestate && regenCount < 1 {
 					s.reloadConversationStateMachine(ctx, &conversation)
 					regenCount++
@@ -315,7 +356,7 @@ generateLoop:
 			selected, err := s.holidayResolver.Resolve(ctx, holiday.ResolveInput{
 				SessionID: conversation.Session.ID,
 				Now:       now,
-				GateSeed:  strconv.FormatInt(update.UpdateID, 10),
+				GateSeed:  message.ExternalUpdateID,
 			})
 			if err != nil {
 				s.logger.Warn("failed to resolve holiday context", "session_id", conversation.Session.ID, "error", err)
@@ -325,16 +366,16 @@ generateLoop:
 			}
 		}
 
-		if err := s.bot.SendChatAction(ctx, update.Message.Chat.ID, telegram.ChatActionTyping); err != nil {
-			s.logger.Warn("failed to send typing action", "chat_id", update.Message.Chat.ID, "error", err)
+		if err := s.sendTyping(ctx, message); err != nil {
+			s.logger.Warn("failed to send typing action", "target", message.Target().Key(), "error", err)
 		}
 
 		memorySections := BuildMemoryPromptSectionsFromStateMachine(topicsForPrompt, stateForAttempt)
-		reply, err := s.generateReply(genCtx, now, messageTimestamp(*update.Message), input, conversation.RecentConversation, conversation.UserProfile, conversation.ProfileCandidates, conversation.UserTraits, stateForAttempt, profilePrompt, holidayContext, userTurnCount, memorySections, conversation.Session.HistorySummary, conversation.CustomSlots)
+		reply, err := s.generateReply(genCtx, now, messageTimestamp(message), input, conversation.RecentConversation, conversation.UserProfile, conversation.ProfileCandidates, conversation.UserTraits, stateForAttempt, profilePrompt, holidayContext, userTurnCount, memorySections, conversation.Session.HistorySummary, conversation.CustomSlots)
 		promptGenerated = err == nil
 		if err != nil {
-			reason := s.generationCoordinator.InterruptReason(chatID, handle.GenerationID)
-			s.generationCoordinator.Finish(chatID, handle.GenerationID)
+			reason := s.generationCoordinator.InterruptReason(chatKey, handle.GenerationID)
+			s.generationCoordinator.Finish(chatKey, handle.GenerationID)
 			if errors.Is(err, context.Canceled) {
 				if reason == interruptReasonSafetyRestate && regenCount < 1 {
 					s.reloadConversationStateMachine(ctx, &conversation)
@@ -343,9 +384,10 @@ generateLoop:
 				}
 				return nil
 			}
-			s.logger.Error("응답 생성에 실패했습니다.", "chat_id", update.Message.Chat.ID, "원인", logx.KoreanError(err))
-			reply = FallbackText()
+			s.logger.Error("응답 생성에 실패했습니다.", "target", message.Target().Key(), "원인", logx.KoreanError(err))
+			reply = s.persona.FallbackText
 		}
+		finalReply = reply
 
 		replyParts := SplitReplyForTelegram(reply)
 		if len(replyParts) == 0 {
@@ -361,22 +403,22 @@ generateLoop:
 					delayMs = 3000
 				}
 
-				s.bot.SendChatAction(ctx, update.Message.Chat.ID, telegram.ChatActionTyping)
+				_ = s.sendTyping(ctx, message)
 
 				select {
 				case <-ctx.Done():
-					s.generationCoordinator.Finish(chatID, handle.GenerationID)
+					s.generationCoordinator.Finish(chatKey, handle.GenerationID)
 					return ctx.Err()
 				case <-genCtx.Done():
-					s.generationCoordinator.Finish(chatID, handle.GenerationID)
+					s.generationCoordinator.Finish(chatKey, handle.GenerationID)
 					return nil
 				case <-time.After(time.Duration(delayMs) * time.Millisecond):
 				}
 			}
 
-			decision := s.generationCoordinator.BeforeSend(chatID, handle.GenerationID)
+			decision := s.generationCoordinator.BeforeSend(chatKey, handle.GenerationID)
 			if !decision.Allow {
-				s.generationCoordinator.Finish(chatID, handle.GenerationID)
+				s.generationCoordinator.Finish(chatKey, handle.GenerationID)
 				if decision.Regenerate && regenCount < 1 {
 					s.reloadConversationStateMachine(ctx, &conversation)
 					regenCount++
@@ -385,21 +427,23 @@ generateLoop:
 				return nil
 			}
 
-			if err := s.bot.SendMessage(ctx, update.Message.Chat.ID, part); err != nil {
-				s.generationCoordinator.Finish(chatID, handle.GenerationID)
+			if err := s.sendText(ctx, message, part); err != nil {
+				s.generationCoordinator.Finish(chatKey, handle.GenerationID)
 				return err
 			}
-			s.generationCoordinator.MarkPartSent(chatID, handle.GenerationID)
+			s.generationCoordinator.MarkPartSent(chatKey, handle.GenerationID)
 
 			if s.store != nil && conversation.Session.ID != 0 {
-				if err := s.store.SaveTurn(
+				if _, err := s.store.SaveTurnRecord(
 					ctx,
 					conversation.Session.ID,
 					"assistant",
 					part,
-					0,
-					update.UpdateID,
-					DefaultSessionMode,
+					store.MessageMeta{
+						Channel:          message.Channel,
+						TelegramUpdateID: message.UpdateIDInt64(),
+					},
+					s.defaultMode(),
 					s.cfg.RecentTurnLimit,
 				); err != nil {
 					// If session was reset/deleted during generation, ignore FK error
@@ -410,9 +454,11 @@ generateLoop:
 			}
 		}
 
-		s.generationCoordinator.Finish(chatID, handle.GenerationID)
+		s.generationCoordinator.Finish(chatKey, handle.GenerationID)
 		break
 	}
+
+	s.maybeSendChatRewardAudio(ctx, message, input, finalReply)
 
 	if s.store != nil && conversation.User.ID != 0 && profilePrompt.TargetSlot != "" && userTurnCount > 0 {
 		if err := s.store.MarkUserProfileSlotPrompted(ctx, conversation.User.ID, profilePrompt.TargetSlot, userTurnCount); err != nil {
@@ -445,7 +491,7 @@ generateLoop:
 	return nil
 }
 
-func (s *Service) handleCommand(ctx context.Context, update telegram.Update, input string) (bool, error) {
+func (s *Service) handleCommand(ctx context.Context, message channelx.InboundMessage, input string) (bool, error) {
 	if !strings.HasPrefix(input, "/") && !strings.HasPrefix(input, "!") {
 		return false, nil
 	}
@@ -459,42 +505,42 @@ func (s *Service) handleCommand(ctx context.Context, update telegram.Update, inp
 
 	switch cmd {
 	case "/start":
-		return true, s.bot.SendMessage(ctx, update.Message.Chat.ID, WelcomeText())
+		return true, s.sendText(ctx, message, s.persona.WelcomeText)
 	case "/ping":
-		return true, s.bot.SendMessage(ctx, update.Message.Chat.ID, "pong")
+		return true, s.sendText(ctx, message, "pong")
 	case "/proactive_on", "/선톡켜", "!proactive_on", "!선톡켜":
-		return true, s.handleProactiveOptCommand(ctx, update, true)
+		return true, s.handleProactiveOptCommand(ctx, message, true)
 	case "/proactive_off", "/선톡꺼", "!proactive_off", "!선톡꺼":
-		return true, s.handleProactiveOptCommand(ctx, update, false)
+		return true, s.handleProactiveOptCommand(ctx, message, false)
 	case "/reset", "/리셋", "!reset", "!리셋":
-		return true, s.handleResetCommand(ctx, update)
+		return true, s.handleResetCommand(ctx, message)
 	case "!내정보", "!info", "/내정보", "/info":
-		return true, s.handleMyInfoCommand(ctx, update)
+		return true, s.handleMyInfoCommand(ctx, message)
 	case "!내정보추가", "!내정보변경", "!내정보수정", "/내정보추가", "/내정보변경", "/내정보수정":
-		return true, s.handleUpdateMyInfoCommand(ctx, update, input)
+		return true, s.handleUpdateMyInfoCommand(ctx, message, input)
 	case "!대화내용", "!context", "/대화내용", "/context":
-		return true, s.handleConversationContentCommand(ctx, update)
+		return true, s.handleConversationContentCommand(ctx, message)
 	case "!취향초기화", "/취향초기화":
-		return true, s.handleClearTraitsCommand(ctx, update)
+		return true, s.handleClearTraitsCommand(ctx, message)
 	case "!상태", "/상태":
-		return true, s.handleStatusCommand(ctx, update)
+		return true, s.handleStatusCommand(ctx, message)
 	case "!내정보수집", "!정보수집", "/내정보수집", "/정보수집":
-		return true, s.handleInfoCollectionCommand(ctx, update)
+		return true, s.handleInfoCollectionCommand(ctx, message)
 	case "!추가슬롯", "/추가슬롯":
-		return true, s.handleAddCustomSlotCommand(ctx, update, input)
+		return true, s.handleAddCustomSlotCommand(ctx, message, input)
 	case "!추가슬롯삭제", "/추가슬롯삭제":
-		return true, s.handleDeleteCustomSlotCommand(ctx, update, input)
+		return true, s.handleDeleteCustomSlotCommand(ctx, message, input)
 	case "!추가슬롯조회", "/추가슬롯조회":
-		return true, s.handleListCustomSlotsCommand(ctx, update)
+		return true, s.handleListCustomSlotsCommand(ctx, message)
 	case "!도움말", "/help", "!help", "/도움말":
-		return true, s.bot.SendMessage(ctx, update.Message.Chat.ID, helpText())
+		return true, s.sendText(ctx, message, helpText())
 	default:
 		// If it's a known typo like the one the user made or clearly intended as a command,
 		// we just absorb it without saving to DB to avoid confusing the LLM.
 		if strings.HasPrefix(cmd, "/") || strings.HasPrefix(cmd, "!") {
 			// Ensure it's not just a bunch of exclamation marks like "!!!"
 			if len(cmd) > 1 && !strings.HasSuffix(cmd, "!") {
-				s.bot.SendMessage(ctx, update.Message.Chat.ID, "알 수 없는 명령어에요. /help 를 입력해 보세요.")
+				_ = s.sendText(ctx, message, "알 수 없는 명령어에요. /help 를 입력해 보세요.")
 				return true, nil
 			}
 		}
@@ -502,35 +548,38 @@ func (s *Service) handleCommand(ctx context.Context, update telegram.Update, inp
 	}
 }
 
-func (s *Service) handleResetCommand(ctx context.Context, update telegram.Update) error {
-	if s.generationCoordinator != nil && update.Message != nil {
-		s.generationCoordinator.CancelActive(update.Message.Chat.ID, interruptReasonReset)
+func (s *Service) handleResetCommand(ctx context.Context, message channelx.InboundMessage) error {
+	if s.generationCoordinator != nil {
+		s.generationCoordinator.CancelActive(message.LockKey(), interruptReasonReset)
 	}
 
-	if s.store == nil || update.Message == nil || update.Message.From == nil {
-		return s.bot.SendMessage(ctx, update.Message.Chat.ID, ResetText())
+	if s.store == nil {
+		return s.sendText(ctx, message, s.persona.ResetText)
 	}
 
-	if _, err := s.store.ResetConversation(ctx, update.Message.From.ID); err != nil {
-		s.logger.Error("failed to reset conversation", "chat_id", update.Message.Chat.ID, "telegram_user_id", update.Message.From.ID, "error", err)
-		return s.bot.SendMessage(ctx, update.Message.Chat.ID, "리셋하다가 잠깐 꼬였어. 한 번만 다시 쳐줘.")
+	if _, err := s.store.ResetConversation(ctx, s.botID(), message.Channel, message.ExternalUserID); err != nil {
+		s.logger.Error("failed to reset conversation", "target", message.Target().Key(), "external_user_id", message.ExternalUserID, "error", err)
+		return s.sendText(ctx, message, "리셋하다가 잠깐 꼬였어. 한 번만 다시 쳐줘.")
 	}
 
 	// 2. Send fixed opening message and save to history
 	// We bootstrap a clean context after reset to get new session/user info.
-	conversation, err := s.store.BootstrapContext(ctx, *update.Message, DefaultSessionMode, s.cfg.RecentTurnLimit)
+	conversation, err := s.store.BootstrapContext(ctx, message, s.defaultMode(), s.cfg.RecentTurnLimit)
 	if err != nil {
-		return s.bot.SendMessage(ctx, update.Message.Chat.ID, "좋아, 다 잊었어! 우리 이제 새로 시작하자. 먼저 인사해 줄래?")
+		return s.sendText(ctx, message, "좋아, 다 잊었어! 우리 이제 새로 시작하자. 먼저 인사해 줄래?")
 	}
 
-	fullResponse := "좋아, 깔끔하게 다 잊었어! 우리 새로 시작하는 거다?\n안녕. 이름이 뭐야?"
-	if err := s.bot.SendMessage(ctx, update.Message.Chat.ID, fullResponse); err != nil {
+	fullResponse := s.persona.ResetOpeningText
+	if err := s.sendText(ctx, message, fullResponse); err != nil {
 		return err
 	}
 
 	// 3. Save the opener to history so that user's next reply has context.
 	if s.store != nil {
-		_ = s.store.SaveTurn(ctx, conversation.Session.ID, "assistant", fullResponse, 0, update.UpdateID, DefaultSessionMode, s.cfg.RecentTurnLimit)
+		_, _ = s.store.SaveTurnRecord(ctx, conversation.Session.ID, "assistant", fullResponse, store.MessageMeta{
+			Channel:          message.Channel,
+			TelegramUpdateID: message.UpdateIDInt64(),
+		}, s.defaultMode(), s.cfg.RecentTurnLimit)
 		// Mark name slot as prompted
 		_ = s.store.MarkUserProfileSlotPrompted(ctx, conversation.User.ID, profileSlotName, 1)
 	}
@@ -538,28 +587,25 @@ func (s *Service) handleResetCommand(ctx context.Context, update telegram.Update
 	return nil
 }
 
-func (s *Service) handleProactiveOptCommand(ctx context.Context, update telegram.Update, enabled bool) error {
-	if update.Message == nil {
-		return nil
-	}
+func (s *Service) handleProactiveOptCommand(ctx context.Context, message channelx.InboundMessage, enabled bool) error {
 	if s.store == nil {
-		return s.bot.SendMessage(ctx, update.Message.Chat.ID, "선톡 설정은 지금 잠깐 안 되고 있어요.")
+		return s.sendText(ctx, message, "선톡 설정은 지금 잠깐 안 되고 있어요.")
 	}
 
-	conversation, err := s.store.BootstrapContext(ctx, *update.Message, DefaultSessionMode, s.cfg.RecentTurnLimit)
+	conversation, err := s.store.BootstrapContext(ctx, message, s.defaultMode(), s.cfg.RecentTurnLimit)
 	if err != nil {
-		s.logger.Warn("failed to bootstrap context for proactive opt command", "chat_id", update.Message.Chat.ID, "error", err)
-		return s.bot.SendMessage(ctx, update.Message.Chat.ID, "선톡 설정하다가 잠깐 꼬였어. 한 번만 다시 쳐줘.")
+		s.logger.Warn("failed to bootstrap context for proactive opt command", "target", message.Target().Key(), "error", err)
+		return s.sendText(ctx, message, s.persona.ProactiveErrorText)
 	}
 
 	if err := s.store.SetSessionProactiveOptIn(ctx, conversation.Session.ID, enabled); err != nil {
 		s.logger.Warn("failed to update proactive opt-in", "session_id", conversation.Session.ID, "enabled", enabled, "error", err)
-		return s.bot.SendMessage(ctx, update.Message.Chat.ID, "선톡 설정하다가 잠깐 꼬였어. 한 번만 다시 쳐줘.")
+		return s.sendText(ctx, message, s.persona.ProactiveErrorText)
 	}
 
 	if enabled {
 		bestWindows := []map[string]any{}
-		for _, window := range defaultBestTimeWindows(messageTimestamp(*update.Message)) {
+		for _, window := range defaultBestTimeWindows(messageTimestamp(message)) {
 			bestWindows = append(bestWindows, map[string]any{
 				"weekdays": window["weekdays"],
 				"start":    window["start"],
@@ -582,20 +628,20 @@ func (s *Service) handleProactiveOptCommand(ctx context.Context, update telegram
 		}); err != nil {
 			s.logger.Warn("failed to ensure proactive profile", "user_id", conversation.User.ID, "error", err)
 		}
-		return s.bot.SendMessage(ctx, update.Message.Chat.ID, "선톡 켰어. 너무 들이대진 않고, 타이밍 맞을 때만 먼저 톡할게.")
+		return s.sendText(ctx, message, s.persona.ProactiveOnText)
 	}
 
-	return s.bot.SendMessage(ctx, update.Message.Chat.ID, "선톡 껐어. 이제 네가 먼저 말 걸 때만 답할게.")
+	return s.sendText(ctx, message, s.persona.ProactiveOffText)
 }
 
-func (s *Service) handleMyInfoCommand(ctx context.Context, update telegram.Update) error {
-	if s.store == nil || update.Message == nil {
+func (s *Service) handleMyInfoCommand(ctx context.Context, message channelx.InboundMessage) error {
+	if s.store == nil {
 		return nil
 	}
 
-	conversation, err := s.store.BootstrapContext(ctx, *update.Message, DefaultSessionMode, s.cfg.RecentTurnLimit)
+	conversation, err := s.store.BootstrapContext(ctx, message, s.defaultMode(), s.cfg.RecentTurnLimit)
 	if err != nil {
-		return s.bot.SendMessage(ctx, update.Message.Chat.ID, "정보를 불러오는 데 실패했어.")
+		return s.sendText(ctx, message, "정보를 불러오는 데 실패했어.")
 	}
 
 	var sb strings.Builder
@@ -622,17 +668,17 @@ func (s *Service) handleMyInfoCommand(ctx context.Context, update telegram.Updat
 		}
 	}
 
-	return s.bot.SendMessage(ctx, update.Message.Chat.ID, sb.String())
+	return s.sendText(ctx, message, sb.String())
 }
 
-func (s *Service) handleStatusCommand(ctx context.Context, update telegram.Update) error {
-	if s.store == nil || update.Message == nil {
+func (s *Service) handleStatusCommand(ctx context.Context, message channelx.InboundMessage) error {
+	if s.store == nil {
 		return nil
 	}
 
-	conversation, err := s.store.BootstrapContext(ctx, *update.Message, DefaultSessionMode, s.cfg.RecentTurnLimit)
+	conversation, err := s.store.BootstrapContext(ctx, message, s.defaultMode(), s.cfg.RecentTurnLimit)
 	if err != nil {
-		return s.bot.SendMessage(ctx, update.Message.Chat.ID, "상태 정보를 불러오는 데 실패했어.")
+		return s.sendText(ctx, message, "상태 정보를 불러오는 데 실패했어.")
 	}
 
 	// Fetch additional memory slots not in BootstrapContext
@@ -646,7 +692,7 @@ func (s *Service) handleStatusCommand(ctx context.Context, update telegram.Updat
 
 	mode := conversation.Session.Mode
 	if mode == "" {
-		mode = DefaultSessionMode
+		mode = s.defaultMode()
 	}
 	sb.WriteString(fmt.Sprintf("• 현재 모드: `%s`\n", mode))
 	sb.WriteString(fmt.Sprintf("• 선톡(Proactive): %s\n", renderEnabled(conversation.Session.ProactiveOptIn)))
@@ -675,13 +721,13 @@ func (s *Service) handleStatusCommand(ctx context.Context, update telegram.Updat
 		sb.WriteString(fmt.Sprintf("\n⏳ *[수집 일시정지]*\n• 프로필 수집 중단: %d턴까지\n", conversation.UserProfile.CollectionPausedUntilTurn))
 	}
 
-	return s.bot.SendMessage(ctx, update.Message.Chat.ID, sb.String())
+	return s.sendText(ctx, message, sb.String())
 }
 
-func (s *Service) handleInfoCollectionCommand(ctx context.Context, update telegram.Update) error {
-	conversation, err := s.store.BootstrapContext(ctx, *update.Message, DefaultSessionMode, s.cfg.RecentTurnLimit)
+func (s *Service) handleInfoCollectionCommand(ctx context.Context, message channelx.InboundMessage) error {
+	conversation, err := s.store.BootstrapContext(ctx, message, s.defaultMode(), s.cfg.RecentTurnLimit)
 	if err != nil {
-		return s.bot.SendMessage(ctx, update.Message.Chat.ID, "세션 정보를 불러오는 데 실패했어.")
+		return s.sendText(ctx, message, "세션 정보를 불러오는 데 실패했어.")
 	}
 
 	// 1. Force History Summary
@@ -690,7 +736,7 @@ func (s *Service) handleInfoCollectionCommand(ctx context.Context, update telegr
 	// 2. Force Profile Batch Review
 	s.enqueueProfileBatchReview(&conversation, conversation.UserTurnCount, 0, true)
 
-	return s.bot.SendMessage(ctx, update.Message.Chat.ID, "⚙️ 정보 수집(히스토리 요약 및 프로필 검토)을 백그라운드에서 즉시 시작했어. 잠시 후에 `!내정보`나 `!상태`를 확인해봐!")
+	return s.sendText(ctx, message, "⚙️ 정보 수집(히스토리 요약 및 프로필 검토)을 백그라운드에서 즉시 시작했어. 잠시 후에 `!내정보`나 `!상태`를 확인해봐!")
 }
 
 func renderEnabled(enabled bool) string {
@@ -713,16 +759,14 @@ func renderPhase(phase string) string {
 	}
 }
 
-
-
-func (s *Service) handleConversationContentCommand(ctx context.Context, update telegram.Update) error {
-	if s.store == nil || update.Message == nil {
+func (s *Service) handleConversationContentCommand(ctx context.Context, message channelx.InboundMessage) error {
+	if s.store == nil {
 		return nil
 	}
 
-	conversation, err := s.store.BootstrapContext(ctx, *update.Message, DefaultSessionMode, s.cfg.RecentTurnLimit)
+	conversation, err := s.store.BootstrapContext(ctx, message, s.defaultMode(), s.cfg.RecentTurnLimit)
 	if err != nil {
-		return s.bot.SendMessage(ctx, update.Message.Chat.ID, "대화 내용을 불러오는 데 실패했어.")
+		return s.sendText(ctx, message, "대화 내용을 불러오는 데 실패했어.")
 	}
 
 	// Fetch additional memory slots not in BootstrapContext
@@ -764,17 +808,17 @@ func (s *Service) handleConversationContentCommand(ctx context.Context, update t
 		}
 	}
 
-	return s.bot.SendMessage(ctx, update.Message.Chat.ID, sb.String())
+	return s.sendText(ctx, message, sb.String())
 }
 
-func (s *Service) handleClearTraitsCommand(ctx context.Context, update telegram.Update) error {
-	if s.store == nil || update.Message == nil {
+func (s *Service) handleClearTraitsCommand(ctx context.Context, message channelx.InboundMessage) error {
+	if s.store == nil {
 		return nil
 	}
 
-	conversation, err := s.store.BootstrapContext(ctx, *update.Message, DefaultSessionMode, s.cfg.RecentTurnLimit)
+	conversation, err := s.store.BootstrapContext(ctx, message, s.defaultMode(), s.cfg.RecentTurnLimit)
 	if err != nil {
-		return s.bot.SendMessage(ctx, update.Message.Chat.ID, "유저 정보를 불러올 수 없어.")
+		return s.sendText(ctx, message, "유저 정보를 불러올 수 없어.")
 	}
 
 	// Because we don't have a direct DeleteUserTraits method, we can run a raw query here just for debugging.
@@ -790,7 +834,7 @@ func (s *Service) handleClearTraitsCommand(ctx context.Context, update telegram.
 		})
 	}
 
-	return s.bot.SendMessage(ctx, update.Message.Chat.ID, "✅ 과거에 잘못 저장된 모든 취향 정보(Traits)를 리셋(Delete 처리) 완료했습니다.")
+	return s.sendText(ctx, message, "✅ 과거에 잘못 저장된 모든 취향 정보(Traits)를 리셋(Delete 처리) 완료했습니다.")
 }
 
 func helpText() string {
@@ -898,7 +942,7 @@ func (s *Service) generateReply(ctx context.Context, now time.Time, currentInput
 	}
 	reply = sanitizeByConversationPhase(reply, stateMachine.TonePhase)
 	if reply == "" {
-		reply = FallbackText()
+		reply = s.persona.FallbackText
 	}
 
 	return reply, nil
@@ -975,7 +1019,7 @@ func (s *Service) applyFastConversationState(ctx context.Context, conversation *
 	conversation.ConversationStateMachine = normalizeConversationStateMachine(updated)
 }
 
-func (s *Service) enqueueAsyncStateReview(chatID int64, conversation *store.ConversationContext, input string, userTurnCount int, sourceMessageID int64) {
+func (s *Service) enqueueAsyncStateReview(chatKey string, conversation *store.ConversationContext, input string, userTurnCount int, sourceMessageID int64) {
 	if s == nil || s.store == nil || s.stateReviewer == nil || s.stateReviewRunner == nil || conversation == nil || conversation.Session.ID == 0 || sourceMessageID == 0 {
 		return
 	}
@@ -1016,7 +1060,7 @@ func (s *Service) enqueueAsyncStateReview(chatID int64, conversation *store.Conv
 				}
 
 				if triggerSafety && s.generationCoordinator != nil {
-					s.generationCoordinator.RequestSafetyRestate(chatID, sessionID, updated.Revision)
+					s.generationCoordinator.RequestSafetyRestate(chatKey, sessionID, updated.Revision)
 				}
 				return nil
 			}, nil

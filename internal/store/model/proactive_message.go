@@ -15,6 +15,8 @@ type ProactiveMessage struct {
 	Score             float64
 	MessageText       string
 	SeedKey           string
+	Channel           string
+	ExternalMessageID string
 	TelegramMessageID int64
 	SentAt            time.Time
 	DeliveryStatus    string

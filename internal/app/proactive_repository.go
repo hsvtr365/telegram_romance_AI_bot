@@ -7,20 +7,29 @@ import (
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/chat"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/proactive"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/store"
-	pgstore "github.com/hsvtr365/telegram_romance_AI_bot/internal/store/postgres"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/store/model"
+	pgstore "github.com/hsvtr365/telegram_romance_AI_bot/internal/store/postgres"
 )
 
 type proactiveRepository struct {
-	store *store.Manager
+	store       *store.Manager
+	botID       string
+	channel     string
+	defaultMode string
 }
 
-func newProactiveRepository(conversationStore *store.Manager) *proactiveRepository {
-	return &proactiveRepository{store: conversationStore}
+func newProactiveRepository(conversationStore *store.Manager, persona chat.Persona, channelName string) *proactiveRepository {
+	persona = persona.Normalized()
+	return &proactiveRepository{
+		store:       conversationStore,
+		botID:       persona.BotID,
+		channel:     channelName,
+		defaultMode: persona.DefaultSessionMode,
+	}
 }
 
 func (r *proactiveRepository) ListSessionsForProactive(ctx context.Context, _ time.Time) ([]proactive.SessionSnapshot, error) {
-	items, err := r.store.ListActiveProactiveSessions(ctx, 200)
+	items, err := r.store.ListActiveProactiveSessions(ctx, r.botID, r.channel, 200)
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +102,7 @@ func (r *proactiveRepository) GetMemorySummary(ctx context.Context, sessionID in
 
 	return chat.BuildMemorySummaryFromStateMachine(snapshot.TopicSlots, snapshot.ConversationStateMachine), nil
 }
- 
+
 func (r *proactiveRepository) ListSessionCustomSlots(ctx context.Context, sessionID int64) ([]model.CustomSlot, error) {
 	return r.store.ListSessionCustomSlots(ctx, sessionID)
 }
@@ -120,6 +129,8 @@ func (r *proactiveRepository) InsertProactiveMessage(ctx context.Context, record
 		Score:             record.Score,
 		MessageText:       record.MessageText,
 		SeedKey:           record.SeedKey,
+		Channel:           record.Channel,
+		ExternalMessageID: record.ExternalMessageID,
 		TelegramMessageID: record.TelegramMessageID,
 		SentAt:            record.SentAt,
 		DeliveryStatus:    string(record.DeliveryStatus),
@@ -139,11 +150,14 @@ func (r *proactiveRepository) UpdateProactiveMessage(ctx context.Context, record
 	if record.UserReplied {
 		return r.store.MarkProactiveMessageReplied(ctx, record.ID, record.ReplyDelaySec, record.ReplySentiment, record.ReplyLength, record.FollowupTurnCount)
 	}
-	return r.store.UpdateProactiveMessageDelivery(ctx, record.ID, record.TelegramMessageID, record.SentAt, string(record.DeliveryStatus))
+	return r.store.UpdateProactiveMessageDelivery(ctx, record.ID, record.Channel, record.ExternalMessageID, record.TelegramMessageID, record.SentAt, string(record.DeliveryStatus))
 }
 
 func (r *proactiveRepository) SaveConversationTurn(ctx context.Context, sessionID int64, role string, content string, mode string, recentTurnLimit int) error {
-	return r.store.SaveTurn(ctx, sessionID, role, content, 0, 0, fallbackString(mode, chat.DefaultSessionMode), recentTurnLimit)
+	_, err := r.store.SaveTurnRecord(ctx, sessionID, role, content, store.MessageMeta{
+		Channel: r.channel,
+	}, fallbackString(mode, r.defaultMode), recentTurnLimit)
+	return err
 }
 
 func (r *proactiveRepository) MarkMemoryEventUsedForProactive(ctx context.Context, eventID int64) error {

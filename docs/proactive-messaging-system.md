@@ -21,8 +21,10 @@
 
 현재 코드 기준 재사용 포인트는 분명하다.
 
-- Telegram 발송은 [`internal/telegram/client.go`](/Users/suji/Documents/P2/internal/telegram/client.go) 의 `SendMessage`, `SendChatAction`를 그대로 쓴다.
+- 발송은 [`internal/channel/types.go`](/Users/suji/Documents/P2/internal/channel/types.go)의 `Messenger` contract를 쓴다.
+- Telegram 발송은 [`internal/telegram/client.go`](/Users/suji/Documents/P2/internal/telegram/client.go)가 `SendText`, `SendTyping`, `SendAudio`로 adapter 구현을 제공한다.
 - Ollama 호출은 [`internal/ollama/client.go`](/Users/suji/Documents/P2/internal/ollama/client.go) 의 `Chat`을 그대로 쓴다.
+- 보상 음성은 [`internal/gemini/tts.go`](/Users/suji/Documents/P2/internal/gemini/tts.go)가 Gemini TTS audio를 생성하고 raw PCM 응답을 WAV로 변환한다.
 - 최근 대화 로드는 [`internal/store/store.go`](/Users/suji/Documents/P2/internal/store/store.go) 의 `loadRecentConversation` 경로를 재사용한다.
 - 일반 대화 로그 저장 규약은 [`internal/store/store.go`](/Users/suji/Documents/P2/internal/store/store.go) 의 `SaveTurn`, `SaveTurnRecord` 경로를 따른다.
 - 출력 후처리는 [`internal/chat/postprocess.go`](/Users/suji/Documents/P2/internal/chat/postprocess.go) 의 `PostProcess`, `SplitReplyForTelegram`를 재사용한다.
@@ -102,13 +104,14 @@ flowchart LR
 
 실행 흐름은 아래와 같다.
 
-1. 일반 대화는 기존처럼 `Poller -> chat.Service -> Store -> Ollama -> Telegram` 흐름으로 처리한다.
+1. 일반 대화는 `channel runner -> chat.Service -> Store -> Ollama -> channel messenger` 흐름으로 처리한다. 현재 runner/messenger 구현은 Telegram adapter다.
 2. 사용자가 메시지를 보낼 때 `chat.Service`는 기존 저장 로직을 유지하면서 `last_user_message_at`, presence, reply-to-proactive 힌트를 함께 남긴다.
 3. `Proactive Scheduler`는 주기적으로 세션과 이벤트를 스캔해 `TriggerCandidate`를 만든다.
 4. `Decision Engine`은 각 후보를 `Eligibility`로 걸러낸 뒤 점수 계산을 한다.
 5. 점수가 threshold를 넘으면 `Message Composer`가 seed 선택 후 Ollama 자연화를 수행한다.
-6. `sender worker`가 Telegram으로 발송하고, `tg_proactive_messages`와 필요 시 `tg_chat_messages`에 함께 기록한다.
+6. `sender worker`가 channel target으로 발송하고, `tg_proactive_messages`와 필요 시 `tg_chat_messages`에 함께 기록한다.
 7. 이후 사용자의 답장이 오면 `feedback worker`가 선톡 반응을 분석해 `relationship_score`, 유형별 성공률, 시간대 선호를 갱신한다.
+8. bot의 `reward_tts_enabled`가 켜져 있으면 warm reply/follow-up을 보상 음성 트리거로 사용한다.
 
 ---
 
@@ -911,7 +914,7 @@ CREATE TABLE IF NOT EXISTS tg_proactive_profiles (
 ### 11.3 `sender worker`
 
 #### 역할
-- 최종 메시지 조립, Telegram 발송, DB 기록을 담당한다.
+- 최종 메시지 조립, channel target 발송, DB 기록을 담당한다.
 
 #### 호출 주기
 - 상시 loop
@@ -922,7 +925,7 @@ CREATE TABLE IF NOT EXISTS tg_proactive_profiles (
 - 최종 strategy와 context
 
 #### 출력
-- Telegram 전송
+- channel text/audio 전송
 - `tg_proactive_messages` 저장
 - 필요 시 `tg_chat_messages`에도 assistant turn 저장
 - 세션 상태 갱신
@@ -1272,12 +1275,13 @@ internal/store/redis/
 - `PostProcess`, `SplitReplyForTelegram` 재사용
 
 #### `internal/proactive/sender.go`
-- Telegram 발송
+- `channel.OutboundTarget` 기반 발송
 - 선톡 로그 저장
 - 세션 상태 갱신
 
 #### `internal/proactive/feedback.go`
 - 답장 매칭
+- feedback result는 `reward_tts_enabled` bot의 보상 음성 트리거 입력으로도 사용된다.
 - reply metrics 계산
 - profile, relationship score 갱신
 

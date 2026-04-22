@@ -3,8 +3,10 @@ package proactive
 import (
 	"context"
 	"log/slog"
+	"strconv"
 	"time"
 
+	channelx "github.com/hsvtr365/telegram_romance_AI_bot/internal/channel"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/chat"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/holiday"
 )
@@ -34,6 +36,7 @@ func (s *Sender) SetHolidayResolver(resolver holiday.ContextResolver) {
 func (s *Sender) Send(ctx context.Context, session SessionSnapshot, decision Decision, composeResult ComposeResult) (ProactiveMessageRecord, error) {
 	candidate := decision.Candidate
 	strategy := decision.Strategy
+	target := targetFromSession(session)
 	record := ProactiveMessageRecord{
 		SessionID:      session.SessionID,
 		UserID:         session.UserID,
@@ -46,6 +49,7 @@ func (s *Sender) Send(ctx context.Context, session SessionSnapshot, decision Dec
 		Score:          decision.Score.Score,
 		MessageText:    composeResult.Message,
 		SeedKey:        composeResult.Seed.Key,
+		Channel:        target.Channel,
 		DeliveryStatus: DeliveryQueued,
 		CreatedAt:      time.Now(),
 		UpdatedAt:      time.Now(),
@@ -60,10 +64,10 @@ func (s *Sender) Send(ctx context.Context, session SessionSnapshot, decision Dec
 	}
 
 	if s.bot != nil {
-		if err := s.bot.SendChatAction(ctx, session.TelegramChatID, "typing"); err != nil && s.logger != nil {
+		if err := s.bot.SendTyping(ctx, target); err != nil && s.logger != nil {
 			s.logger.Warn("proactive send chat action failed", "session_id", session.SessionID, "error", err)
 		}
-		if err := s.sendText(ctx, session.TelegramChatID, composeResult.Message); err != nil {
+		if err := s.sendText(ctx, target, composeResult.Message); err != nil {
 			record.DeliveryStatus = DeliveryFailed
 			record.UpdatedAt = time.Now()
 			if s.repo != nil {
@@ -100,17 +104,28 @@ func (s *Sender) Send(ctx context.Context, session SessionSnapshot, decision Dec
 	return record, nil
 }
 
-func (s *Sender) sendText(ctx context.Context, chatID int64, text string) error {
+func (s *Sender) sendText(ctx context.Context, target channelx.OutboundTarget, text string) error {
 	parts := chat.SplitReplyForTelegram(text)
 	if len(parts) == 0 {
 		parts = []string{text}
 	}
 
 	for _, part := range parts {
-		if err := s.bot.SendMessage(ctx, chatID, part); err != nil {
+		if err := s.bot.SendText(ctx, target, part); err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+func targetFromSession(session SessionSnapshot) channelx.OutboundTarget {
+	target := session.Target
+	if target.Channel == "" {
+		target.Channel = channelx.Telegram
+	}
+	if target.ExternalChatID == "" && session.TelegramChatID != 0 {
+		target.ExternalChatID = strconv.FormatInt(session.TelegramChatID, 10)
+	}
+	return target
 }

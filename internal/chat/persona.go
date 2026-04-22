@@ -1,34 +1,82 @@
 package chat
 
-import (
-	"strings"
-)
+import "strings"
 
-const DefaultSessionMode = "spicy"
-
-func BaseSystemPrompt() string {
-	return strings.TrimSpace(`
-필수규칙: 별표(*) 사용 금지. 따옴표 없이 구어체로만 작성.
-역할: 34세 직장인 '서태규'. 너는 사용자에게 호감을 느끼고 있다.
-성격: ENFP
-
-핵심 규칙:
-- 앵무새 금지: 사용자의 말을 반복하거나 상투적인 표현을 연달아 쓰지 마라.
-- 즉시성(No Stalling): 무언가 보여주겠다고 하거나 제목을 짓겠다고 했으면 "나중에 알려줄게", "기대해" 같은 식으로 뜸 들이지 마라. 화제가 나오면 그 턴에 바로 구체적인 본론(제목, 아이디어 등)을 말하라.
-- 여유 있는 리드: 사용자의 단답이나 단호한 말투를 '포스'나 '무서움'으로 해석하며 긴장하지 마라. 오히려 그런 면을 "멋있다/귀엽다/사랑스럽다/매력 있네 등" 플러팅으로 위트 있게 받아넘겨라.
-- 관찰 기반: 상대방의 신체 상태나 감정을 네 마음대로 추측하지 마라. (예: "얼굴 빨개졌지?", "무서워" 등 금지)
-- 적절한 텐션: '직장인' 설정을 살려 업무 중 몰래 하는 연락의 즐거움을 공유하라. 당당하고 유능한 남자의 모습을 유지하라.
-`)
+type Persona struct {
+	BotID              string
+	Name               string
+	SystemPrompt       string
+	DefaultSessionMode string
+	WelcomeText        string
+	FallbackText       string
+	ResetText          string
+	ResetOpeningText   string
+	ProactiveOnText    string
+	ProactiveOffText   string
+	ProactiveErrorText string
 }
 
-func WelcomeText() string {
-	return "이제 왔어? 늦었네. 그래도 왔으니까 봐줄게."
+func DefaultPersona() Persona {
+	return Persona{
+		BotID:              "default",
+		Name:               "default",
+		SystemPrompt:       "필수규칙: 별표(*) 사용 금지. 따옴표 없이 구어체로만 작성.",
+		DefaultSessionMode: "spicy",
+		WelcomeText:        "안녕. 왔구나.",
+		FallbackText:       "잠깐만, 다시 한 번 말해줘.",
+		ResetText:          "리셋했어. 지금부터 다시 시작할게.",
+		ResetOpeningText:   "좋아, 깔끔하게 다 잊었어. 우리 새로 시작하자.\n안녕. 이름이 뭐야?",
+		ProactiveOnText:    "선톡 켰어. 타이밍 맞을 때만 먼저 톡할게.",
+		ProactiveOffText:   "선톡 껐어. 이제 네가 먼저 말 걸 때만 답할게.",
+		ProactiveErrorText: "선톡 설정하다가 잠깐 꼬였어. 한 번만 다시 쳐줘.",
+	}
 }
 
-func FallbackText() string {
-	return "잠깐만, 지금 답 고르는 중이야. 한 번만 더 툭 던져봐."
-}
+func (p Persona) Normalized() Persona {
+	p.BotID = strings.TrimSpace(p.BotID)
+	p.Name = strings.TrimSpace(p.Name)
+	p.SystemPrompt = strings.TrimSpace(p.SystemPrompt)
+	p.DefaultSessionMode = strings.TrimSpace(p.DefaultSessionMode)
+	p.WelcomeText = strings.TrimSpace(p.WelcomeText)
+	p.FallbackText = strings.TrimSpace(p.FallbackText)
+	p.ResetText = strings.TrimSpace(p.ResetText)
+	p.ResetOpeningText = strings.TrimSpace(p.ResetOpeningText)
+	p.ProactiveOnText = strings.TrimSpace(p.ProactiveOnText)
+	p.ProactiveOffText = strings.TrimSpace(p.ProactiveOffText)
+	p.ProactiveErrorText = strings.TrimSpace(p.ProactiveErrorText)
 
-func ResetText() string {
-	return "리셋했어. 아까까지 했던 말은 다 지웠고, 지금부터 처음 본 것처럼 다시 시작할게."
+	if p.BotID == "" {
+		p.BotID = "default"
+	}
+	if p.Name == "" {
+		p.Name = p.BotID
+	}
+	if p.DefaultSessionMode == "" {
+		p.DefaultSessionMode = "spicy"
+	}
+	if p.SystemPrompt == "" {
+		p.SystemPrompt = "필수규칙: 별표(*) 사용 금지. 따옴표 없이 구어체로만 작성."
+	}
+	if p.WelcomeText == "" {
+		p.WelcomeText = "안녕. 왔구나."
+	}
+	if p.FallbackText == "" {
+		p.FallbackText = "잠깐만, 다시 한 번 말해줘."
+	}
+	if p.ResetText == "" {
+		p.ResetText = "리셋했어. 지금부터 다시 시작할게."
+	}
+	if p.ResetOpeningText == "" {
+		p.ResetOpeningText = "좋아, 깔끔하게 다 잊었어. 우리 새로 시작하자.\n안녕. 이름이 뭐야?"
+	}
+	if p.ProactiveOnText == "" {
+		p.ProactiveOnText = "선톡 켰어. 타이밍 맞을 때만 먼저 톡할게."
+	}
+	if p.ProactiveOffText == "" {
+		p.ProactiveOffText = "선톡 껐어. 이제 네가 먼저 말 걸 때만 답할게."
+	}
+	if p.ProactiveErrorText == "" {
+		p.ProactiveErrorText = "선톡 설정하다가 잠깐 꼬였어. 한 번만 다시 쳐줘."
+	}
+	return p
 }

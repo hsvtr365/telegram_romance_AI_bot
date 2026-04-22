@@ -31,10 +31,16 @@ type PromptInput struct {
 	CustomSlots              []model.CustomSlot
 }
 
-type PromptBuilder struct{}
+type PromptBuilder struct {
+	persona Persona
+}
 
-func NewPromptBuilder() *PromptBuilder {
-	return &PromptBuilder{}
+func NewPromptBuilder(personas ...Persona) *PromptBuilder {
+	persona := DefaultPersona()
+	if len(personas) > 0 {
+		persona = personas[0]
+	}
+	return &PromptBuilder{persona: persona.Normalized()}
 }
 
 func (b *PromptBuilder) Build(input PromptInput) []ollama.Message {
@@ -96,11 +102,11 @@ func (b *PromptBuilder) Build(input PromptInput) []ollama.Message {
 	promptutil.WriteConversation(&userSection, "Recent Conversation", messages)
 
 	// Final directive to prevent meta-commentary and identity collapse
-	userSection.WriteString("\n따옴표나 별표 같은 특수문자를 남발하지 말고, 부연 설명 없이 오직 '서태규' 그 자체로서 상대방에게 보낼 다음 메시지만 바로 작성하세요.\n")
+	userSection.WriteString(fmt.Sprintf("\n따옴표나 별표 같은 특수문자를 남발하지 말고, 부연 설명 없이 오직 '%s' 그 자체로서 상대방에게 보낼 다음 메시지만 바로 작성하세요.\n", b.persona.Name))
 	userSection.WriteString("특히 '알겠습니다', '분위기를 이어받아' 같은 AI다운 서론은 절대 쓰지 마세요.\n")
 
 	msgs := []ollama.Message{
-		{Role: "system", Content: BaseSystemPrompt()},
+		{Role: "system", Content: b.persona.SystemPrompt},
 		{Role: "user", Content: userSection.String()},
 	}
 

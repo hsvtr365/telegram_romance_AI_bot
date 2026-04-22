@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/hsvtr365/telegram_romance_AI_bot/internal/store/model"
 )
 
 func TestPickBestCandidate_PrefersHigherPriority(t *testing.T) {
@@ -205,6 +207,10 @@ func (r *memorySummaryRepo) ListRecentProactiveMessages(context.Context, int64, 
 func (r *memorySummaryRepo) GetMemorySummary(_ context.Context, _ int64, _ int) (string, error) {
 	r.memorySummaryCalls++
 	return r.memorySummary, nil
+}
+
+func (r *memorySummaryRepo) ListSessionCustomSlots(context.Context, int64) ([]model.CustomSlot, error) {
+	return nil, nil
 }
 
 func (r *memorySummaryRepo) GetProactiveProfile(context.Context, int64) (ProactiveProfile, error) {

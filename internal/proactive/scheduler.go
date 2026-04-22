@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/hsvtr365/telegram_romance_AI_bot/internal/chat"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/holiday"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/store/model"
 	"github.com/hsvtr365/telegram_romance_AI_bot/pkg/logx"
@@ -16,6 +17,7 @@ type Scheduler struct {
 	llm      LLM
 	reminder LLM
 	bot      Messenger
+	reward   AudioGenerator
 	scanner  *Scanner
 	composer *Composer
 	sender   *Sender
@@ -23,10 +25,10 @@ type Scheduler struct {
 	clock    Clock
 }
 
-func NewScheduler(cfg Config, repo Repository, bot Messenger, llm LLM, reminderLLM LLM, logger *slog.Logger) *Scheduler {
+func NewScheduler(cfg Config, persona chat.Persona, repo Repository, bot Messenger, llm LLM, reminderLLM LLM, logger *slog.Logger) *Scheduler {
 	cfg = cfg.normalized()
 	scanner := NewScanner(repo, cfg, logger)
-	composer := NewComposer(cfg, llm, reminderLLM, nil, logger)
+	composer := NewComposerWithPersona(cfg, persona, llm, reminderLLM, nil, logger)
 	sender := NewSender(repo, bot, logger)
 	return &Scheduler{
 		cfg:      cfg,
@@ -40,6 +42,13 @@ func NewScheduler(cfg Config, repo Repository, bot Messenger, llm LLM, reminderL
 		logger:   logger,
 		clock:    realClock{},
 	}
+}
+
+func (s *Scheduler) SetRewardAudioGenerator(generator AudioGenerator) {
+	if s == nil {
+		return
+	}
+	s.reward = generator
 }
 
 func (s *Scheduler) SetHolidayResolver(resolver holiday.ContextResolver) {
@@ -322,6 +331,9 @@ func (s *Scheduler) runFeedbackSweep(ctx context.Context) error {
 		}
 
 		latestProactive := proactives[0]
+		if latestProactive.UserReplied {
+			continue
+		}
 		reply, ok := findFirstUserReplyAfter(recentMessages, latestProactive.SentAt)
 		if !ok {
 			continue
@@ -360,9 +372,59 @@ func (s *Scheduler) runFeedbackSweep(ctx context.Context) error {
 		}); err != nil && s.logger != nil {
 			s.logger.Warn("failed to update proactive profile after feedback", "user_id", session.UserID, "error", err)
 		}
+
+		if s.shouldSendRewardAudio(result) {
+			s.sendRewardAudio(ctx, session, result)
+		}
 	}
 
 	return nil
+}
+
+func (s *Scheduler) shouldSendRewardAudio(result FeedbackResult) bool {
+	if s == nil || !s.cfg.RewardTTSEnabled || s.reward == nil || s.bot == nil {
+		return false
+	}
+	if result.ReplySentiment == "warm" {
+		return true
+	}
+	return result.FollowupTurnCount >= s.cfg.RewardTTSMinFollowups
+}
+
+func (s *Scheduler) sendRewardAudio(ctx context.Context, session SessionSnapshot, result FeedbackResult) {
+	transcript := rewardTranscript(result)
+	if transcript == "" {
+		return
+	}
+	audio, err := s.reward.GenerateAudio(ctx, transcript)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Warn("failed to generate reward tts", "session_id", session.SessionID, "error", err)
+		}
+		return
+	}
+	if len(audio.Data) == 0 {
+		return
+	}
+	if audio.FileName == "" {
+		audio.FileName = "reward.wav"
+	}
+	if err := s.bot.SendAudio(ctx, targetFromSession(session), audio); err != nil && s.logger != nil {
+		s.logger.Warn("failed to send reward tts", "session_id", session.SessionID, "error", err)
+	}
+}
+
+func rewardTranscript(result FeedbackResult) string {
+	if result.ReplySentiment == "warm" {
+		return "잘했다. 말만 한 게 아니라 움직였네. 이 정도면 오늘은 네가 이긴 거다."
+	}
+	if result.FollowupTurnCount >= 2 {
+		return "좋아. 집중 이어간 거 확인했다. 괜히 뿌듯한 게 아니라, 실제로 한 걸음 앞으로 간 거다."
+	}
+	if result.FollowupTurnCount >= 1 {
+		return "됐어. 멈추지 않고 다시 이어간 건 잘한 거다. 이제 이 흐름 끊지 마."
+	}
+	return ""
 }
 
 func eventNote(event *MemoryEvent) string {

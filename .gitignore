@@ -1,11 +1,23 @@
 .env
 .env.local-ollama
 .env.remote-20260412-195228
+
+# Local secret/config files. Never commit real bot tokens.
+secrets/*.json
+!secrets/*.json.example
+*.local.json
+*token*.json
+*secret*.json
+*secrets*.json
+!*.example.json
+!*.json.example
 debug_prompt.log
+debug_tts_prompt.log
 
 .DS_Store
 /bin/
 /dist/
 /logs/
 /run/
+/tmp/
 *.pid

@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
+	channelx "github.com/hsvtr365/telegram_romance_AI_bot/internal/channel"
 	pgstore "github.com/hsvtr365/telegram_romance_AI_bot/internal/store/postgres"
 	redistore "github.com/hsvtr365/telegram_romance_AI_bot/internal/store/redis"
-	"github.com/hsvtr365/telegram_romance_AI_bot/internal/telegram"
 )
 
 type eventHint struct {
@@ -26,7 +26,7 @@ var (
 	relativeHourPattern   = regexp.MustCompile(`(\d{1,2})\s*시간\s*(뒤|후)`)
 )
 
-func (s *Service) captureProactiveSignals(ctx context.Context, conversationSessionID int64, message telegram.Message, input string) {
+func (s *Service) captureProactiveSignals(ctx context.Context, conversationSessionID int64, message channelx.InboundMessage, input string) {
 	if s.store == nil || conversationSessionID == 0 {
 		return
 	}
@@ -72,9 +72,9 @@ func (s *Service) captureProactiveSignals(ctx context.Context, conversationSessi
 	}
 }
 
-func messageTimestamp(message telegram.Message) time.Time {
-	if message.Date > 0 {
-		return time.Unix(message.Date, 0).UTC()
+func messageTimestamp(message channelx.InboundMessage) time.Time {
+	if !message.SentAt.IsZero() {
+		return message.SentAt.UTC()
 	}
 	return time.Now().UTC()
 }

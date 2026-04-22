@@ -8,29 +8,29 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hsvtr365/telegram_romance_AI_bot/internal/telegram"
+	channelx "github.com/hsvtr365/telegram_romance_AI_bot/internal/channel"
 )
 
-func (s *Service) handleAddCustomSlotCommand(ctx context.Context, update telegram.Update, input string) error {
+func (s *Service) handleAddCustomSlotCommand(ctx context.Context, message channelx.InboundMessage, input string) error {
 	parts := strings.SplitN(input, " ", 2)
 	if len(parts) < 2 {
-		return s.bot.SendMessage(ctx, update.Message.Chat.ID, "사용법: !추가슬롯 [내용]")
+		return s.sendText(ctx, message, "사용법: !추가슬롯 [내용]")
 	}
 
 	content := strings.TrimSpace(parts[1])
 	if content == "" {
-		return s.bot.SendMessage(ctx, update.Message.Chat.ID, "추가할 내용을 입력해줘.")
+		return s.sendText(ctx, message, "추가할 내용을 입력해줘.")
 	}
 
-	conversation, err := s.store.BootstrapContext(ctx, *update.Message, DefaultSessionMode, s.cfg.RecentTurnLimit)
+	conversation, err := s.store.BootstrapContext(ctx, message, s.defaultMode(), s.cfg.RecentTurnLimit)
 	if err != nil {
-		return s.bot.SendMessage(ctx, update.Message.Chat.ID, "세션 정보를 불러오는 데 실패했어.")
+		return s.sendText(ctx, message, "세션 정보를 불러오는 데 실패했어.")
 	}
 
 	slots := conversation.CustomSlots
 
 	if len(slots) >= 10 {
-		return s.bot.SendMessage(ctx, update.Message.Chat.ID, "슬롯이 가득 찼어 (최대 10개). 삭제 후 다시 시도해줘. 조회 명령어: `!추가슬롯조회`")
+		return s.sendText(ctx, message, "슬롯이 가득 찼어 (최대 10개). 삭제 후 다시 시도해줘. 조회 명령어: `!추가슬롯조회`")
 	}
 
 	// Find the lowest available index (0-9)
@@ -55,27 +55,27 @@ func (s *Service) handleAddCustomSlotCommand(ctx context.Context, update telegra
 		if s.logger != nil {
 			s.logger.Error("failed to add custom slot", "error", err)
 		}
-		return s.bot.SendMessage(ctx, update.Message.Chat.ID, "설정 추가 중 오류가 발생했어.")
+		return s.sendText(ctx, message, "설정 추가 중 오류가 발생했어.")
 	}
 
-	return s.bot.SendMessage(ctx, update.Message.Chat.ID, fmt.Sprintf("✅ 슬롯 [%d]에 설정이 추가되었어.\n저장된 내용: %s", targetIndex, finalContent))
+	return s.sendText(ctx, message, fmt.Sprintf("✅ 슬롯 [%d]에 설정이 추가되었어.\n저장된 내용: %s", targetIndex, finalContent))
 }
 
-func (s *Service) handleDeleteCustomSlotCommand(ctx context.Context, update telegram.Update, input string) error {
+func (s *Service) handleDeleteCustomSlotCommand(ctx context.Context, message channelx.InboundMessage, input string) error {
 	parts := strings.SplitN(input, " ", 2)
 	if len(parts) < 2 {
-		return s.bot.SendMessage(ctx, update.Message.Chat.ID, "사용법: !추가슬롯삭제 [번호]")
+		return s.sendText(ctx, message, "사용법: !추가슬롯삭제 [번호]")
 	}
 
 	indexStr := strings.TrimSpace(parts[1])
 	index, err := strconv.Atoi(indexStr)
 	if err != nil || index < 0 || index > 9 {
-		return s.bot.SendMessage(ctx, update.Message.Chat.ID, "올바른 슬롯 번호(0~9)를 입력해줘.")
+		return s.sendText(ctx, message, "올바른 슬롯 번호(0~9)를 입력해줘.")
 	}
 
-	conversation, err := s.store.BootstrapContext(ctx, *update.Message, DefaultSessionMode, s.cfg.RecentTurnLimit)
+	conversation, err := s.store.BootstrapContext(ctx, message, s.defaultMode(), s.cfg.RecentTurnLimit)
 	if err != nil {
-		return s.bot.SendMessage(ctx, update.Message.Chat.ID, "세션 정보를 불러오는 데 실패했어.")
+		return s.sendText(ctx, message, "세션 정보를 불러오는 데 실패했어.")
 	}
 
 	err = s.store.DeleteSessionCustomSlot(ctx, conversation.Session.ID, index)
@@ -83,21 +83,21 @@ func (s *Service) handleDeleteCustomSlotCommand(ctx context.Context, update tele
 		if s.logger != nil {
 			s.logger.Error("failed to delete custom slot", "error", err)
 		}
-		return s.bot.SendMessage(ctx, update.Message.Chat.ID, "설정 삭제 중 오류가 발생했어.")
+		return s.sendText(ctx, message, "설정 삭제 중 오류가 발생했어.")
 	}
 
-	return s.bot.SendMessage(ctx, update.Message.Chat.ID, fmt.Sprintf("🗑 슬롯 [%d]의 설정이 삭제되었어.", index))
+	return s.sendText(ctx, message, fmt.Sprintf("🗑 슬롯 [%d]의 설정이 삭제되었어.", index))
 }
 
-func (s *Service) handleListCustomSlotsCommand(ctx context.Context, update telegram.Update) error {
-	conversation, err := s.store.BootstrapContext(ctx, *update.Message, DefaultSessionMode, s.cfg.RecentTurnLimit)
+func (s *Service) handleListCustomSlotsCommand(ctx context.Context, message channelx.InboundMessage) error {
+	conversation, err := s.store.BootstrapContext(ctx, message, s.defaultMode(), s.cfg.RecentTurnLimit)
 	if err != nil {
-		return s.bot.SendMessage(ctx, update.Message.Chat.ID, "세션 정보를 불러오는 데 실패했어.")
+		return s.sendText(ctx, message, "세션 정보를 불러오는 데 실패했어.")
 	}
 
 	slots := conversation.CustomSlots
 	if len(slots) == 0 {
-		return s.bot.SendMessage(ctx, update.Message.Chat.ID, "현재 저장된 추가 슬롯이 없어.\n`!추가슬롯 [내용]`으로 등록해봐.")
+		return s.sendText(ctx, message, "현재 저장된 추가 슬롯이 없어.\n`!추가슬롯 [내용]`으로 등록해봐.")
 	}
 
 	sort.Slice(slots, func(i, j int) bool {
@@ -112,5 +112,5 @@ func (s *Service) handleListCustomSlotsCommand(ctx context.Context, update teleg
 
 	sb.WriteString("\n*삭제 명령어*: `!추가슬롯삭제 [번호]`")
 
-	return s.bot.SendMessage(ctx, update.Message.Chat.ID, sb.String())
+	return s.sendText(ctx, message, sb.String())
 }

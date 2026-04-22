@@ -22,10 +22,16 @@ type PromptInput struct {
 	CustomSlots        []model.CustomSlot
 }
 
-type PromptBuilder struct{}
+type PromptBuilder struct {
+	persona chat.Persona
+}
 
-func NewPromptBuilder() *PromptBuilder {
-	return &PromptBuilder{}
+func NewPromptBuilder(personas ...chat.Persona) *PromptBuilder {
+	persona := chat.DefaultPersona()
+	if len(personas) > 0 {
+		persona = personas[0]
+	}
+	return &PromptBuilder{persona: persona.Normalized()}
 }
 
 func (b *PromptBuilder) Build(input PromptInput) []ollama.Message {
@@ -67,7 +73,7 @@ func (b *PromptBuilder) Build(input PromptInput) []ollama.Message {
 	}
 	promptutil.WriteConversation(&userSection, "Recent Conversation", messages)
 
-	systemPrompt := chat.BaseSystemPrompt() + "\n\n" + strings.TrimSpace(`
+	systemPrompt := b.persona.SystemPrompt + "\n\n" + strings.TrimSpace(`
 추가 역할: 텔레그램 가상연애 봇의 선톡 메시지 작성기.
 목표: 주어진 seed와 컨텍스트를 바탕으로 자연스럽고 짧은 선톡 한 건을 만든다.
 추가 규칙:

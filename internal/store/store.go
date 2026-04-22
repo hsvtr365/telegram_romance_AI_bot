@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
+	channelx "github.com/hsvtr365/telegram_romance_AI_bot/internal/channel"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/store/model"
 	pgstore "github.com/hsvtr365/telegram_romance_AI_bot/internal/store/postgres"
 	redistore "github.com/hsvtr365/telegram_romance_AI_bot/internal/store/redis"
-	"github.com/hsvtr365/telegram_romance_AI_bot/internal/telegram"
 )
 
 type Config struct {
@@ -41,6 +41,13 @@ type Manager struct {
 type ResetResult struct {
 	HadData    bool
 	SessionIDs []int64
+}
+
+type MessageMeta struct {
+	Channel           string
+	ExternalMessageID string
+	TelegramMessageID int64
+	TelegramUpdateID  int64
 }
 
 func New(ctx context.Context, cfg Config, logger *slog.Logger) (*Manager, error) {
@@ -82,16 +89,20 @@ func (m *Manager) Close() {
 	}
 }
 
-func (m *Manager) BootstrapContext(ctx context.Context, message telegram.Message, defaultMode string, recentTurnLimit int) (ConversationContext, error) {
-	if message.From == nil {
-		return ConversationContext{}, fmt.Errorf("telegram message has no sender")
+func (m *Manager) BootstrapContext(ctx context.Context, message channelx.InboundMessage, defaultMode string, recentTurnLimit int) (ConversationContext, error) {
+	if strings.TrimSpace(message.ExternalUserID) == "" {
+		return ConversationContext{}, fmt.Errorf("channel message has no external user id")
 	}
 
 	user, err := m.postgres.UpsertUser(ctx, pgstore.UpsertUserParams{
-		TelegramUserID: message.From.ID,
-		TelegramChatID: message.Chat.ID,
-		Username:       message.From.Username,
-		FirstName:      message.From.FirstName,
+		BotID:          message.BotID,
+		Channel:        message.Channel,
+		ExternalUserID: message.ExternalUserID,
+		ExternalChatID: message.ExternalChatID,
+		TelegramUserID: message.UserIDInt64(),
+		TelegramChatID: message.ChatIDInt64(),
+		Username:       message.Username,
+		FirstName:      message.FirstName,
 	})
 	if err != nil {
 		return ConversationContext{}, err
@@ -176,18 +187,23 @@ func (m *Manager) BootstrapContext(ctx context.Context, message telegram.Message
 	}, nil
 }
 
-func (m *Manager) SaveTurnRecord(ctx context.Context, sessionID int64, role string, content string, telegramMessageID int64, updateID int64, mode string, recentTurnLimit int) (model.Message, error) {
+func (m *Manager) SaveTurnRecord(ctx context.Context, sessionID int64, role string, content string, meta MessageMeta, mode string, recentTurnLimit int) (model.Message, error) {
 	content = strings.TrimSpace(content)
 	if sessionID == 0 || content == "" {
 		return model.Message{}, nil
 	}
 
 	now := time.Now()
+	if meta.Channel == "" {
+		meta.Channel = channelx.Telegram
+	}
 
 	record, err := m.postgres.InsertMessage(ctx, pgstore.InsertMessageParams{
 		SessionID:         sessionID,
-		TelegramMessageID: telegramMessageID,
-		TelegramUpdateID:  updateID,
+		Channel:           meta.Channel,
+		ExternalMessageID: meta.ExternalMessageID,
+		TelegramMessageID: meta.TelegramMessageID,
+		TelegramUpdateID:  meta.TelegramUpdateID,
 		Role:              role,
 		Content:           content,
 		Mode:              mode,
@@ -212,37 +228,49 @@ func (m *Manager) SaveTurnRecord(ctx context.Context, sessionID int64, role stri
 }
 
 func (m *Manager) SaveTurn(ctx context.Context, sessionID int64, role string, content string, telegramMessageID int64, updateID int64, mode string, recentTurnLimit int) error {
-	_, err := m.SaveTurnRecord(ctx, sessionID, role, content, telegramMessageID, updateID, mode, recentTurnLimit)
+	_, err := m.SaveTurnRecord(ctx, sessionID, role, content, MessageMeta{
+		Channel:           channelx.Telegram,
+		ExternalMessageID: formatExternalID(telegramMessageID),
+		TelegramMessageID: telegramMessageID,
+		TelegramUpdateID:  updateID,
+	}, mode, recentTurnLimit)
 	return err
 }
 
-func (m *Manager) ResetConversation(ctx context.Context, telegramUserID int64) (ResetResult, error) {
-	if telegramUserID == 0 {
+func (m *Manager) ResetConversation(ctx context.Context, botID string, channelName string, externalUserID string) (ResetResult, error) {
+	if strings.TrimSpace(externalUserID) == "" {
 		return ResetResult{}, nil
 	}
 
-	sessionIDs, err := m.postgres.ListSessionIDsByTelegramUser(ctx, telegramUserID)
+	sessionIDs, err := m.postgres.ListSessionIDsByExternalUser(ctx, botID, channelName, externalUserID)
 	if err != nil {
 		return ResetResult{}, err
 	}
 
-	deleted, err := m.postgres.DeleteConversationByTelegramUser(ctx, telegramUserID)
+	deleted, err := m.postgres.DeleteConversationByExternalUser(ctx, botID, channelName, externalUserID)
 	if err != nil {
 		return ResetResult{}, err
 	}
 
 	if err := m.redis.DeleteRecent(ctx, sessionIDs); err != nil {
-		m.logger.Warn("failed to clear redis recent cache during reset", "telegram_user_id", telegramUserID, "error", err)
+		m.logger.Warn("failed to clear redis recent cache during reset", "external_user_id", externalUserID, "channel", channelName, "error", err)
 	}
 
 	if err := m.redis.DeleteProactiveSessionData(ctx, sessionIDs); err != nil {
-		m.logger.Warn("failed to clear redis proactive cache during reset", "telegram_user_id", telegramUserID, "error", err)
+		m.logger.Warn("failed to clear redis proactive cache during reset", "external_user_id", externalUserID, "channel", channelName, "error", err)
 	}
 
 	return ResetResult{
 		HadData:    deleted || len(sessionIDs) > 0,
 		SessionIDs: sessionIDs,
 	}, nil
+}
+
+func formatExternalID(value int64) string {
+	if value == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d", value)
 }
 
 func (m *Manager) TouchSessionMessage(ctx context.Context, sessionID int64, role string, at time.Time) error {
@@ -385,8 +413,8 @@ func (m *Manager) InsertProactiveMessage(ctx context.Context, params pgstore.Ins
 	return m.postgres.InsertProactiveMessage(ctx, params)
 }
 
-func (m *Manager) UpdateProactiveMessageDelivery(ctx context.Context, messageID int64, telegramMessageID int64, sentAt time.Time, status string) error {
-	return m.postgres.UpdateProactiveMessageDelivery(ctx, messageID, telegramMessageID, sentAt, status)
+func (m *Manager) UpdateProactiveMessageDelivery(ctx context.Context, messageID int64, channelName string, externalMessageID string, telegramMessageID int64, sentAt time.Time, status string) error {
+	return m.postgres.UpdateProactiveMessageDelivery(ctx, messageID, channelName, externalMessageID, telegramMessageID, sentAt, status)
 }
 
 func (m *Manager) MarkProactiveMessageReplied(ctx context.Context, messageID int64, replyDelaySec int, replySentiment string, replyLength int, followupTurnCount int) error {
@@ -405,8 +433,8 @@ func (m *Manager) ListActiveSessionsForProactiveScan(ctx context.Context, limit 
 	return m.postgres.ListActiveSessionsForProactiveScan(ctx, limit)
 }
 
-func (m *Manager) ListActiveProactiveSessions(ctx context.Context, limit int) ([]model.ProactiveSession, error) {
-	return m.postgres.ListActiveProactiveSessions(ctx, limit)
+func (m *Manager) ListActiveProactiveSessions(ctx context.Context, botID string, channelName string, limit int) ([]model.ProactiveSession, error) {
+	return m.postgres.ListActiveProactiveSessions(ctx, botID, channelName, limit)
 }
 
 func (m *Manager) ListConversationMessages(ctx context.Context, sessionID int64, limit int) ([]model.Message, error) {

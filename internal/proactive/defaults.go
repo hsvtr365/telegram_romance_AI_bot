@@ -29,6 +29,7 @@ const (
 	DefaultFeedbackInterval      = 10 * time.Minute
 	DefaultSenderInterval        = 1 * time.Second
 	DefaultWorkerConcurrency     = 1
+	DefaultRewardTTSMinFollowups = 1
 
 	DefaultTimezoneName = "Asia/Seoul"
 )
@@ -62,6 +63,8 @@ type Config struct {
 	FeedbackInterval           time.Duration
 	SenderConcurrency          int
 	TimezoneName               string
+	RewardTTSEnabled           bool
+	RewardTTSMinFollowups      int
 }
 
 func DefaultConfig() Config {
@@ -94,6 +97,7 @@ func DefaultConfig() Config {
 		FeedbackInterval:           DefaultFeedbackInterval,
 		SenderConcurrency:          DefaultWorkerConcurrency,
 		TimezoneName:               DefaultTimezoneName,
+		RewardTTSMinFollowups:      DefaultRewardTTSMinFollowups,
 	}
 }
 
@@ -166,6 +170,9 @@ func (c Config) normalized() Config {
 	}
 	if c.TimezoneName == "" {
 		c.TimezoneName = DefaultTimezoneName
+	}
+	if c.RewardTTSMinFollowups <= 0 {
+		c.RewardTTSMinFollowups = DefaultRewardTTSMinFollowups
 	}
 	return c
 }

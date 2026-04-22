@@ -13,37 +13,37 @@ const (
 )
 
 type GenerationHandle struct {
-	ChatID                int64
-	SessionID             int64
-	SourceMessageID       int64
-	GenerationID          int64
-	StateRevisionAtStart  int64
-	InterruptReason       string
-	PreSendEligible       bool
-	PartsSent             int
-	RegenCount            int
-	cancel                context.CancelFunc
+	ChatKey              string
+	SessionID            int64
+	SourceMessageID      int64
+	GenerationID         int64
+	StateRevisionAtStart int64
+	InterruptReason      string
+	PreSendEligible      bool
+	PartsSent            int
+	RegenCount           int
+	cancel               context.CancelFunc
 }
 
 type GenerationCoordinator struct {
 	mu      sync.Mutex
 	nextID  int64
-	handles map[int64]*GenerationHandle
+	handles map[string]*GenerationHandle
 }
 
 func NewGenerationCoordinator() *GenerationCoordinator {
 	return &GenerationCoordinator{
-		handles: make(map[int64]*GenerationHandle),
+		handles: make(map[string]*GenerationHandle),
 	}
 }
 
-func (c *GenerationCoordinator) CancelActive(chatID int64, reason string) {
-	if c == nil || chatID == 0 {
+func (c *GenerationCoordinator) CancelActive(chatKey string, reason string) {
+	if c == nil || chatKey == "" {
 		return
 	}
 
 	c.mu.Lock()
-	handle := c.handles[chatID]
+	handle := c.handles[chatKey]
 	if handle != nil && reason != "" {
 		handle.InterruptReason = reason
 	}
@@ -55,11 +55,11 @@ func (c *GenerationCoordinator) CancelActive(chatID int64, reason string) {
 	}
 }
 
-func (c *GenerationCoordinator) Begin(parent context.Context, chatID int64, sessionID int64, sourceMessageID int64, stateRevision int64, regenCount int) (*GenerationHandle, context.Context) {
+func (c *GenerationCoordinator) Begin(parent context.Context, chatKey string, sessionID int64, sourceMessageID int64, stateRevision int64, regenCount int) (*GenerationHandle, context.Context) {
 	if c == nil {
 		ctx, cancel := context.WithCancel(parent)
 		return &GenerationHandle{
-			ChatID:               chatID,
+			ChatKey:              chatKey,
 			SessionID:            sessionID,
 			SourceMessageID:      sourceMessageID,
 			StateRevisionAtStart: stateRevision,
@@ -75,7 +75,7 @@ func (c *GenerationCoordinator) Begin(parent context.Context, chatID int64, sess
 	c.mu.Lock()
 	c.nextID++
 	handle := &GenerationHandle{
-		ChatID:               chatID,
+		ChatKey:              chatKey,
 		SessionID:            sessionID,
 		SourceMessageID:      sourceMessageID,
 		GenerationID:         c.nextID,
@@ -85,7 +85,7 @@ func (c *GenerationCoordinator) Begin(parent context.Context, chatID int64, sess
 		RegenCount:           regenCount,
 		cancel:               cancel,
 	}
-	c.handles[chatID] = handle
+	c.handles[chatKey] = handle
 	c.mu.Unlock()
 
 	return handle, ctx
@@ -97,7 +97,7 @@ type BeforeSendDecision struct {
 	Reason     string
 }
 
-func (c *GenerationCoordinator) BeforeSend(chatID int64, generationID int64) BeforeSendDecision {
+func (c *GenerationCoordinator) BeforeSend(chatKey string, generationID int64) BeforeSendDecision {
 	if c == nil {
 		return BeforeSendDecision{Allow: true}
 	}
@@ -105,7 +105,7 @@ func (c *GenerationCoordinator) BeforeSend(chatID int64, generationID int64) Bef
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	handle := c.handles[chatID]
+	handle := c.handles[chatKey]
 	if handle == nil || handle.GenerationID != generationID {
 		return BeforeSendDecision{Allow: false, Reason: interruptReasonNewInput}
 	}
@@ -123,7 +123,7 @@ func (c *GenerationCoordinator) BeforeSend(chatID int64, generationID int64) Bef
 	}
 }
 
-func (c *GenerationCoordinator) MarkPartSent(chatID int64, generationID int64) {
+func (c *GenerationCoordinator) MarkPartSent(chatKey string, generationID int64) {
 	if c == nil {
 		return
 	}
@@ -131,7 +131,7 @@ func (c *GenerationCoordinator) MarkPartSent(chatID int64, generationID int64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	handle := c.handles[chatID]
+	handle := c.handles[chatKey]
 	if handle == nil || handle.GenerationID != generationID {
 		return
 	}
@@ -139,7 +139,7 @@ func (c *GenerationCoordinator) MarkPartSent(chatID int64, generationID int64) {
 	handle.PreSendEligible = false
 }
 
-func (c *GenerationCoordinator) Finish(chatID int64, generationID int64) {
+func (c *GenerationCoordinator) Finish(chatKey string, generationID int64) {
 	if c == nil {
 		return
 	}
@@ -147,20 +147,20 @@ func (c *GenerationCoordinator) Finish(chatID int64, generationID int64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	handle := c.handles[chatID]
+	handle := c.handles[chatKey]
 	if handle == nil || handle.GenerationID != generationID {
 		return
 	}
-	delete(c.handles, chatID)
+	delete(c.handles, chatKey)
 }
 
-func (c *GenerationCoordinator) RequestSafetyRestate(chatID int64, sessionID int64, newRevision int64) bool {
-	if c == nil || chatID == 0 {
+func (c *GenerationCoordinator) RequestSafetyRestate(chatKey string, sessionID int64, newRevision int64) bool {
+	if c == nil || chatKey == "" {
 		return false
 	}
 
 	c.mu.Lock()
-	handle := c.handles[chatID]
+	handle := c.handles[chatKey]
 	if handle == nil || handle.SessionID != sessionID || !handle.PreSendEligible || handle.PartsSent > 0 || handle.RegenCount >= 1 {
 		c.mu.Unlock()
 		return false
@@ -180,7 +180,7 @@ func (c *GenerationCoordinator) RequestSafetyRestate(chatID int64, sessionID int
 	return true
 }
 
-func (c *GenerationCoordinator) InterruptReason(chatID int64, generationID int64) string {
+func (c *GenerationCoordinator) InterruptReason(chatKey string, generationID int64) string {
 	if c == nil {
 		return interruptReasonNone
 	}
@@ -188,7 +188,7 @@ func (c *GenerationCoordinator) InterruptReason(chatID int64, generationID int64
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	handle := c.handles[chatID]
+	handle := c.handles[chatKey]
 	if handle == nil || handle.GenerationID != generationID {
 		return interruptReasonNewInput
 	}

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	channelx "github.com/hsvtr365/telegram_romance_AI_bot/internal/channel"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/ollama"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/store/model"
 )
@@ -142,23 +143,24 @@ type TimeWindow struct {
 }
 
 type SessionSnapshot struct {
-	SessionID                   int64         `json:"session_id"`
-	UserID                      int64         `json:"user_id"`
-	TelegramChatID              int64         `json:"telegram_chat_id"`
-	Mode                        string        `json:"mode"`
-	LastUserMessageAt           time.Time     `json:"last_user_message_at"`
-	LastBotMessageAt            time.Time     `json:"last_bot_message_at"`
-	LastProactiveAt             time.Time     `json:"last_proactive_at"`
-	LastUserReplyToProactiveAt  time.Time     `json:"last_user_reply_to_proactive_at"`
-	ConsecutiveProactiveIgnored int           `json:"consecutive_proactive_ignored"`
-	RelationshipScore           float64       `json:"relationship_score"`
-	CurrentMood                 string        `json:"current_mood"`
-	ProactiveOptIn              bool          `json:"proactive_opt_in"`
-	QuietHours                  []QuietWindow `json:"quiet_hours,omitempty"`
-	TimezoneName                string        `json:"timezone_name"`
-	LastMessageAt               time.Time     `json:"last_message_at"`
-	RecentTurnLimit             int           `json:"recent_turn_limit"`
-	UpdatedAt                   time.Time     `json:"updated_at"`
+	SessionID                   int64                   `json:"session_id"`
+	UserID                      int64                   `json:"user_id"`
+	Target                      channelx.OutboundTarget `json:"target"`
+	TelegramChatID              int64                   `json:"telegram_chat_id"`
+	Mode                        string                  `json:"mode"`
+	LastUserMessageAt           time.Time               `json:"last_user_message_at"`
+	LastBotMessageAt            time.Time               `json:"last_bot_message_at"`
+	LastProactiveAt             time.Time               `json:"last_proactive_at"`
+	LastUserReplyToProactiveAt  time.Time               `json:"last_user_reply_to_proactive_at"`
+	ConsecutiveProactiveIgnored int                     `json:"consecutive_proactive_ignored"`
+	RelationshipScore           float64                 `json:"relationship_score"`
+	CurrentMood                 string                  `json:"current_mood"`
+	ProactiveOptIn              bool                    `json:"proactive_opt_in"`
+	QuietHours                  []QuietWindow           `json:"quiet_hours,omitempty"`
+	TimezoneName                string                  `json:"timezone_name"`
+	LastMessageAt               time.Time               `json:"last_message_at"`
+	RecentTurnLimit             int                     `json:"recent_turn_limit"`
+	UpdatedAt                   time.Time               `json:"updated_at"`
 }
 
 type ConversationMessage struct {
@@ -228,6 +230,8 @@ type ProactiveMessageRecord struct {
 	Score             float64        `json:"score"`
 	MessageText       string         `json:"message_text"`
 	SeedKey           string         `json:"seed_key,omitempty"`
+	Channel           string         `json:"channel,omitempty"`
+	ExternalMessageID string         `json:"external_message_id,omitempty"`
 	TelegramMessageID int64          `json:"telegram_message_id,omitempty"`
 	SentAt            time.Time      `json:"sent_at,omitempty"`
 	DeliveryStatus    DeliveryStatus `json:"delivery_status"`
@@ -302,9 +306,10 @@ type ProactiveProfilePatch struct {
 	WeightOverrides       map[string]float64
 }
 
-type Messenger interface {
-	SendMessage(ctx context.Context, chatID int64, text string) error
-	SendChatAction(ctx context.Context, chatID int64, action string) error
+type Messenger = channelx.Messenger
+
+type AudioGenerator interface {
+	GenerateAudio(ctx context.Context, transcript string) (channelx.AudioAttachment, error)
 }
 
 type LLM interface {
