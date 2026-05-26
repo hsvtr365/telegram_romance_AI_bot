@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/ollama"
 	"github.com/hsvtr365/telegram_romance_AI_bot/internal/store"
@@ -257,6 +258,34 @@ func (s *Service) persistStructuredExtraction(ctx context.Context, userID int64,
 		}); err != nil && s.logger != nil {
 			s.logger.Warn("failed to merge profile candidate (async)", "user_id", userID, "slot", candidate.SlotName, "value", candidate.CandidateValue, "error", err)
 		}
+
+		// Immediate promotion for Name slot:
+		if candidate.SlotName == profileSlotName {
+			if s.logger != nil {
+				s.logger.Info("promoting name immediately to profile", "user_id", userID, "name", candidate.CandidateValue)
+			}
+			patch := pgstore.UpsertUserProfileParams{
+				UserID:    userID,
+				NameValue: candidate.CandidateValue,
+			}
+			if _, err := s.store.UpsertUserProfile(ctx, patch); err != nil {
+				if s.logger != nil {
+					s.logger.Warn("failed to immediately upsert name into user profile", "user_id", userID, "name", candidate.CandidateValue, "error", err)
+				}
+			} else {
+				// Also update candidate status to confirmed in DB
+				if err := s.store.UpdateProfileCandidateStatus(ctx, pgstore.UpdateProfileCandidateStatusParams{
+					UserID:          userID,
+					SlotName:        candidate.SlotName,
+					NormalizedValue: candidate.NormalizedValue,
+					Status:          model.ProfileCandidateStatusConfirmed,
+					ReviewedAt:      capturedAt,
+					PromotedAt:      capturedAt,
+				}); err != nil && s.logger != nil {
+					s.logger.Warn("failed to update profile candidate status for immediately promoted name", "user_id", userID, "error", err)
+				}
+			}
+		}
 	}
 }
 
@@ -290,7 +319,11 @@ func (s *Service) shouldUseStructuredExtraction(input string) bool {
 	}
 
 	normalized := normalizeInput(input)
-	if len([]rune(normalized)) < 2 { // Increased minimum slightly to skip pure noise/reactions
+	minChars := s.extractor.minChars
+	if minChars <= 0 {
+		minChars = 2
+	}
+	if len([]rune(normalized)) < minChars {
 		return false
 	}
 
@@ -525,7 +558,15 @@ func mergedStructuredProfileValue(slot string, existingValue string, field struc
 	if existingValue == nextValue {
 		return ""
 	}
-	if existingValue == "" && !explicit {
+	if existingValue == "" {
+		confidence := normalizeConfidence(field.Confidence)
+		evidenceType := strings.ToLower(strings.TrimSpace(field.EvidenceType))
+		isHighOrMedium := (confidence == "high" || confidence == "medium")
+		isTentativeOrInferred := (evidenceType == "tentative" || evidenceType == "inferred")
+
+		if explicit || (isHighOrMedium && isTentativeOrInferred) {
+			return nextValue
+		}
 		return ""
 	}
 	return nextValue
@@ -566,8 +607,10 @@ func normalizeStructuredProfileValue(slot string, field structuredField) string 
 		for _, suffix := range []string{"라고 불러", "라고 해", "이라구", "이야", "에요", "예요", "입니다", "이야기", "이구요", "구요", "고요", "요", "야", "이"} {
 			value = strings.TrimSuffix(value, suffix)
 		}
+		value = strings.TrimSuffix(value, "님")
+		value = strings.TrimSuffix(value, "씨")
 		value = strings.TrimSpace(value)
-		if value == "" || len([]rune(value)) < 1 || len([]rune(value)) > 12 || looksLikeNonName(value) {
+		if value == "" || !isValidName(value) || looksLikeNonName(value) {
 			return ""
 		}
 		return value
@@ -612,6 +655,9 @@ func mergeStructuredTraits(base []extractedTrait, extra []structuredTrait) []ext
 		}
 		// Traits must have explicit or tentative evidence to prevent hallucinated meta-traits
 		evidence := normalizeStructuredEvidenceType(item.EvidenceType)
+		if item.EvidenceType == "" || evidence == "none" {
+			evidence = "explicit"
+		}
 		if evidence != "explicit" && evidence != "tentative" {
 			continue
 		}
@@ -655,4 +701,18 @@ func digitsOnly(value string) string {
 		}
 	}
 	return builder.String()
+}
+
+func isValidName(val string) bool {
+	runes := []rune(val)
+	if len(runes) < 2 || len(runes) > 12 {
+		return false
+	}
+	// Check for invalid characters like numbers, punctuation, or spaces
+	for _, r := range val {
+		if (r >= '0' && r <= '9') || unicode.IsSpace(r) || strings.ContainsRune("!@#$%^&*()_+={}[]|\\:;\"'<>,.?/~`·", r) {
+			return false
+		}
+	}
+	return true
 }

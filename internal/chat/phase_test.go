@@ -4,8 +4,8 @@ import "testing"
 
 func TestDetectConversationPhaseSignal_Sexual(t *testing.T) {
 	got := detectConversationPhaseSignal("나는 섹스톡이야. 더 꼴리게 해", phaseNeutral)
-	if got.NextPhase != phaseSexual {
-		t.Fatalf("expected sexual phase, got %+v", got)
+	if got.NextPhase != phaseFlirty {
+		t.Fatalf("expected flirty phase due to redirect, got %+v", got)
 	}
 	if got.MatchedLanguage != "ko" {
 		t.Fatalf("expected korean match metadata, got %+v", got)
@@ -24,8 +24,8 @@ func TestDetectConversationPhaseSignal_DeescalatesOnDiscomfort(t *testing.T) {
 
 func TestDetectConversationPhaseSignal_SupportsEnglishSexualTrigger(t *testing.T) {
 	got := detectConversationPhaseSignal("Let's do some sexting tonight. Turn me on.", phaseNeutral)
-	if got.NextPhase != phaseSexual {
-		t.Fatalf("expected sexual phase, got %+v", got)
+	if got.NextPhase != phaseFlirty {
+		t.Fatalf("expected flirty phase due to redirect, got %+v", got)
 	}
 	if got.MatchedLanguage != "en" {
 		t.Fatalf("expected english match metadata, got %+v", got)

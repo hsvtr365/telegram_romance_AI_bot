@@ -11,9 +11,11 @@ func TestLoad_ReadsBotsConfig(t *testing.T) {
 	clearConfigEnv(t)
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, ".env"), "TELEGRAM_BOTS_CONFIG_PATH=bots.json\n")
+	writeFile(t, filepath.Join(dir, "common.md"), "common rules")
 	writeFile(t, filepath.Join(dir, "persona-one.md"), "persona one")
 	writeFile(t, filepath.Join(dir, "persona-two.md"), "persona two")
 	writeFile(t, filepath.Join(dir, "bots.json"), `{
+  "common_prompt_path": "common.md",
   "bots": [
     {
       "id": "one",
@@ -45,8 +47,11 @@ func TestLoad_ReadsBotsConfig(t *testing.T) {
 	if len(cfg.Bots) != 2 {
 		t.Fatalf("expected 2 bots, got %d", len(cfg.Bots))
 	}
-	if cfg.Bots[0].PersonaPrompt != "persona one" {
+	if cfg.Bots[0].PersonaPrompt != "common rules\n\npersona one" {
 		t.Fatalf("unexpected first persona prompt: %q", cfg.Bots[0].PersonaPrompt)
+	}
+	if cfg.Bots[1].PersonaPrompt != "common rules\n\npersona two" {
+		t.Fatalf("unexpected second persona prompt: %q", cfg.Bots[1].PersonaPrompt)
 	}
 	if cfg.Bots[1].WelcomeText != "hello two" {
 		t.Fatalf("unexpected second welcome text: %q", cfg.Bots[1].WelcomeText)
@@ -105,7 +110,8 @@ func TestValidateRejectsDuplicateBotID(t *testing.T) {
 func TestLoadFallsBackToLegacyTelegramBotToken(t *testing.T) {
 	clearConfigEnv(t)
 	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, ".env"), "TELEGRAM_BOT_TOKEN=legacy-token\nTELEGRAM_PERSONA_PROMPT_PATH=persona.md\n")
+	writeFile(t, filepath.Join(dir, ".env"), "TELEGRAM_BOT_TOKEN=legacy-token\nTELEGRAM_COMMON_PROMPT_PATH=common.md\nTELEGRAM_PERSONA_PROMPT_PATH=persona.md\n")
+	writeFile(t, filepath.Join(dir, "common.md"), "legacy common")
 	writeFile(t, filepath.Join(dir, "persona.md"), "legacy persona")
 
 	cfg, err := Load(filepath.Join(dir, ".env"))
@@ -118,7 +124,7 @@ func TestLoadFallsBackToLegacyTelegramBotToken(t *testing.T) {
 	if got := cfg.Bots[0].TelegramBotToken; got != "legacy-token" {
 		t.Fatalf("unexpected legacy token: %q", got)
 	}
-	if got := cfg.Bots[0].PersonaPrompt; got != "legacy persona" {
+	if got := cfg.Bots[0].PersonaPrompt; got != "legacy common\n\nlegacy persona" {
 		t.Fatalf("unexpected legacy persona: %q", got)
 	}
 }
@@ -128,6 +134,7 @@ func clearConfigEnv(t *testing.T) {
 	keys := []string{
 		"TELEGRAM_BOTS_CONFIG_PATH",
 		"TELEGRAM_BOT_TOKEN",
+		"TELEGRAM_COMMON_PROMPT_PATH",
 		"TELEGRAM_PERSONA_PROMPT_PATH",
 		"LEE_TOKEN",
 	}

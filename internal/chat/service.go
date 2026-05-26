@@ -63,6 +63,7 @@ type Service struct {
 	holidayResolver      holiday.ContextResolver
 	rewardAudio          AudioGenerator
 	logger               *slog.Logger
+	lorebook             *Lorebook
 
 	generationCoordinator *GenerationCoordinator
 	chatLocksMu           sync.Mutex
@@ -136,6 +137,18 @@ func NewService(cfg Config, persona Persona, bot Messenger, llm LLM, reminderLLM
 		}, memorySlotLLM, conversationStore, analyticRunner, logger)
 	}
 
+	var lb *Lorebook
+	var err error
+	for _, path := range []string{"configs/lorebook.json", "../configs/lorebook.json", "../../configs/lorebook.json", "lorebook.json"} {
+		lb, err = LoadLorebook(path)
+		if err == nil {
+			break
+		}
+	}
+	if err != nil && logger != nil {
+		logger.Warn("could not load lorebook, starting with empty lorebook", "error", err)
+	}
+
 	fastState := NewFastStateEvaluator(cfg.PhaseRulesPath, logger)
 
 	var reviewer *AsyncStateReviewer
@@ -169,6 +182,7 @@ func NewService(cfg Config, persona Persona, bot Messenger, llm LLM, reminderLLM
 		analyticRunner:        analyticRunner,
 		holidayResolver:       holiday.NewResolver(conversationStore, holiday.ResolverConfig{}, logger),
 		logger:                logger,
+		lorebook:              lb,
 		generationCoordinator: NewGenerationCoordinator(),
 		chatLocks:             make(map[string]*sync.Mutex),
 		rewardAudioSent:       make(map[string]struct{}),
@@ -911,6 +925,11 @@ func leftPadTwo(value int) string {
 }
 
 func (s *Service) generateReply(ctx context.Context, now time.Time, currentInputAt time.Time, input string, recentConversation []model.Message, userProfile model.UserProfile, profileCandidates []model.ProfileCandidate, userTraits []model.UserTrait, stateMachine model.ConversationStateMachine, profilePrompt profilePromptContext, holidayContext string, userTurnCount int, memorySections MemoryPromptSections, historySummary string, customSlots []model.CustomSlot) (string, error) {
+	loreContext := ""
+	if s.lorebook != nil {
+		loreContext = s.lorebook.Match(input)
+	}
+
 	messages := s.prompt.Build(PromptInput{
 		UserInput:                input,
 		RecentConversation:       recentConversation,
@@ -929,6 +948,7 @@ func (s *Service) generateReply(ctx context.Context, now time.Time, currentInput
 		OpenLoopsText:            memorySections.OpenLoopsText,
 		MemorySummary:            memorySections.MemorySummary,
 		CustomSlots:              customSlots,
+		LorebookContextText:      loreContext,
 	})
 
 	reply, err := s.llm.Chat(ctx, messages)

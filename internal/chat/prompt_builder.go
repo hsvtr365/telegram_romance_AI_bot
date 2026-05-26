@@ -29,6 +29,7 @@ type PromptInput struct {
 	ConversationStateText    string
 	OpenLoopsText            string
 	CustomSlots              []model.CustomSlot
+	LorebookContextText      string
 }
 
 type PromptBuilder struct {
@@ -52,7 +53,7 @@ func (b *PromptBuilder) Build(input PromptInput) []ollama.Message {
 	promptutil.WriteSection(&userSection, "Current Time", input.CurrentTimeText)
 
 	promptutil.WriteSection(&userSection, "History Summary", historySummaryPromptText(input.HistorySummary))
-	// promptutil.WriteSection(&userSection, "Conversation Phase", conversationPhaseInstruction(input.ConversationStateMachine))
+	promptutil.WriteSection(&userSection, "Conversation Phase", conversationPhaseInstruction(input.ConversationStateMachine))
 
 	if len(input.CustomSlots) > 0 {
 		var slotsSb strings.Builder
@@ -86,6 +87,9 @@ func (b *PromptBuilder) Build(input PromptInput) []ollama.Message {
 	}
 	if summary := userTraitsSummary(input.UserTraits); summary != "" {
 		promptutil.WriteSection(&userSection, "Known User Traits", summary)
+	}
+	if lore := strings.TrimSpace(input.LorebookContextText); lore != "" {
+		promptutil.WriteSection(&userSection, "Dynamic Lorebook Context", lore)
 	}
 	if input.ProfilePrompt.Enabled && strings.TrimSpace(input.ProfilePrompt.Instruction) != "" {
 		promptutil.WriteRawBlock(&userSection, input.ProfilePrompt.Instruction)

@@ -49,8 +49,8 @@ func isMetaLine(line string) bool {
 	
 	// Check for AI completion headers/markers
 	if strings.Contains(line, "**AI:**") || strings.Contains(line, "**Assistant:**") {
-		// If it's just the marker or has meta text, skip the whole line.
-		if len([]rune(line)) < 15 || containsAny(lower, "이어받아", "작성해", "제시해") {
+		stripped := strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(line, "**AI:**", ""), "**Assistant:**", ""))
+		if len([]rune(stripped)) == 0 || containsAny(lower, "이어받아", "작성해", "제시해") {
 			return true
 		}
 	}

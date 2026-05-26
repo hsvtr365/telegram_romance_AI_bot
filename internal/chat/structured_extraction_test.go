@@ -172,3 +172,115 @@ func TestExtractStructuredProfilePatch_UsesCompatFlatLLMResult(t *testing.T) {
 		t.Fatalf("did not expect compat inferred job without explicit evidence, got %#v", got)
 	}
 }
+
+func TestMergedStructuredProfileValue_RelaxedFirstTime(t *testing.T) {
+	tests := []struct {
+		name          string
+		slot          string
+		existingValue string
+		field         structuredField
+		input         string
+		expected      string
+	}{
+		{
+			name:          "Relaxed name extraction with tentative evidence and high confidence",
+			slot:          profileSlotName,
+			existingValue: "",
+			field: structuredField{
+				Value:        "수지",
+				Confidence:   "high",
+				EvidenceText: "수지라고",
+				EvidenceType: "tentative",
+			},
+			input:    "난 수지라고 불러줘",
+			expected: "수지",
+		},
+		{
+			name:          "Relaxed job extraction with inferred evidence and medium confidence",
+			slot:          profileSlotJob,
+			existingValue: "",
+			field: structuredField{
+				Value:        "개발자",
+				Confidence:   "medium",
+				EvidenceText: "코딩",
+				EvidenceType: "inferred",
+			},
+			input:    "요즘 코딩 공부 열심히 해",
+			expected: "개발자",
+		},
+		{
+			name:          "Discarded job extraction with inferred evidence and low confidence",
+			slot:          profileSlotJob,
+			existingValue: "",
+			field: structuredField{
+				Value:        "개발자",
+				Confidence:   "low",
+				EvidenceText: "코딩",
+				EvidenceType: "inferred",
+			},
+			input:    "요즘 코딩 공부 열심히 해",
+			expected: "",
+		},
+		{
+			name:          "Do not overwrite existing confirmed value with tentative/inferred evidence",
+			slot:          profileSlotName,
+			existingValue: "김수지",
+			field: structuredField{
+				Value:        "박수지",
+				Confidence:   "high",
+				EvidenceText: "박수지",
+				EvidenceType: "tentative",
+			},
+			input:    "아냐 내이름 박수지야",
+			expected: "",
+		},
+		{
+			name:          "Clean name with trailing honorific trimmed",
+			slot:          profileSlotName,
+			existingValue: "",
+			field: structuredField{
+				Value:        "수지님",
+				Confidence:   "high",
+				EvidenceText: "수지님",
+				EvidenceType: "explicit",
+			},
+			input:    "나 수지님이야",
+			expected: "수지",
+		},
+		{
+			name:          "Reject single-character particles",
+			slot:          profileSlotName,
+			existingValue: "",
+			field: structuredField{
+				Value:        "나",
+				Confidence:   "high",
+				EvidenceText: "나",
+				EvidenceType: "explicit",
+			},
+			input:    "난 나야",
+			expected: "",
+		},
+		{
+			name:          "Reject names with invalid punctuation",
+			slot:          profileSlotName,
+			existingValue: "",
+			field: structuredField{
+				Value:        "수!지",
+				Confidence:   "high",
+				EvidenceText: "수!지",
+				EvidenceType: "explicit",
+			},
+			input:    "내이름 수!지",
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mergedStructuredProfileValue(tt.slot, tt.existingValue, tt.field, tt.input)
+			if got != tt.expected {
+				t.Errorf("mergedStructuredProfileValue() = %q; want %q", got, tt.expected)
+			}
+		})
+	}
+}

@@ -59,7 +59,8 @@ type ChannelConfig struct {
 }
 
 type botsConfigFile struct {
-	Bots []BotConfig `json:"bots"`
+	CommonPromptPath string      `json:"common_prompt_path"`
+	Bots             []BotConfig `json:"bots"`
 }
 
 type OllamaConfig struct {
@@ -373,13 +374,17 @@ func loadBotConfigs(dotenvPath string) ([]BotConfig, error) {
 		}
 
 		personaBaseDir := filepath.Dir(dotenvPath)
+		commonPrompt, err := readPromptFile(personaBaseDir, strings.TrimSpace(file.CommonPromptPath))
+		if err != nil {
+			return nil, err
+		}
 		for idx := range file.Bots {
 			normalizeBotConfig(&file.Bots[idx])
 			prompt, err := readPromptFile(personaBaseDir, file.Bots[idx].PersonaPromptPath)
 			if err != nil {
 				return nil, err
 			}
-			file.Bots[idx].PersonaPrompt = prompt
+			file.Bots[idx].PersonaPrompt = combinePrompts(commonPrompt, prompt)
 		}
 		return file.Bots, nil
 	}
@@ -401,11 +406,15 @@ func loadBotConfigs(dotenvPath string) ([]BotConfig, error) {
 	}
 	normalizeBotConfig(&bot)
 
+	commonPrompt, err := readPromptFile(filepath.Dir(dotenvPath), envString("TELEGRAM_COMMON_PROMPT_PATH", ""))
+	if err != nil {
+		return nil, err
+	}
 	prompt, err := readPromptFile(filepath.Dir(dotenvPath), bot.PersonaPromptPath)
 	if err != nil {
 		return nil, err
 	}
-	bot.PersonaPrompt = prompt
+	bot.PersonaPrompt = combinePrompts(commonPrompt, prompt)
 	return []BotConfig{bot}, nil
 }
 
@@ -499,6 +508,16 @@ func readPromptFile(baseDir string, path string) (string, error) {
 		return "", fmt.Errorf("read persona prompt %s: %w", path, err)
 	}
 	return strings.TrimSpace(string(payload)), nil
+}
+
+func combinePrompts(parts ...string) string {
+	combined := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			combined = append(combined, trimmed)
+		}
+	}
+	return strings.Join(combined, "\n\n")
 }
 
 func envString(key, fallback string) string {
